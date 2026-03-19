@@ -1,0 +1,1899 @@
+---
+title: "Ch 2 stats and plots file"
+author: "Xavier Francis"
+date: "2025-09-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+#load packages
+```{r}
+library(lubridate)  
+library(purrr)
+library(tibble)               
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(grid)   
+
+```
+
+##day version
+#load and prepare dfs
+```{r}
+aggression_for_br_ready <- read_csv(here("ch2 data",("aggression_for_background.csv")))
+#2021
+sessions_start_end <- read_csv(here("ch2 data","Observation_Hours_Log_2021.csv "))
+
+MOPA_power_score_2021 <- read_csv(here("ch2 data","MOPA_date_rank_2021.csv "))
+
+
+
+MOPA_power_score_2021_hi_form <- MOPA_power_score_2021[(MOPA_power_score_2021$date >= "2021-04-05	" & MOPA_power_score_2021$date <= "2021-05-18" ),]
+```
+
+#conservative version of power cor that, if there was no obs the previous day, returns NA
+```{r}
+#calculate power
+MOPA_power_score_2021_hi_form$power = 1 - MOPA_power_score_2021_hi_form$dom_ec
+
+score_sort_2021 <- MOPA_power_score_2021_hi_form %>%
+  mutate(date = as.Date(date)) %>%
+  arrange(id, date)
+
+
+
+#Calendar gate. checks if  dataset contains  previous calendar day at all
+prev_day_lookup <- score_sort_2021 %>%
+  distinct(date) %>%
+  mutate(date = date + days(1),        #after shift, each date means "yesterday existed"
+         prev_day_exists = TRUE)
+
+score_sort_2021 <- score_sort_2021 %>%
+  left_join(prev_day_lookup, by = "date") %>%
+  group_by(id) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    prev_score_any = lag(power),                         #last time bird id appeared (any bin)
+    prev_for_corr  = if_else(!is.na(prev_day_exists),    #only if the calendar has d-1
+                             prev_score_any, NA_real_),
+    ratio          = if_else(!is.na(prev_for_corr),
+                             power / prev_for_corr, NA_real_)
+  ) %>%
+  ungroup()
+
+
+
+#calculate pearsons correlation 
+
+safe_cor <- function(x, y) {
+  ok <- complete.cases(x, y)
+  if (sum(ok) < 2) return(NA_real_)       
+  cor(x[ok], y[ok])
+}
+
+cor_by_day <- score_sort_2021 %>%
+  group_by(date) %>%
+  summarize(
+    cor_score_prev = safe_cor(power, prev_for_corr),
+    n_pairs        = sum(complete.cases(power, prev_for_corr)),
+    .groups = "drop"
+  )
+
+cor_by_day_ci <- cor_by_day %>%
+  mutate(
+    #guardrails. CI needs n >= 4 (because SE = 1/sqrt(n-3))
+    can_ci = is.finite(cor_score_prev) & n_pairs >= 4,
+    #clamp r away from ±1 to avoid Inf on atanh
+    r_clamped = pmin(pmax(cor_score_prev, -0.999999), 0.999999),
+    z = if_else(can_ci, atanh(r_clamped), NA_real_),
+    se = if_else(can_ci, 1 / sqrt(n_pairs - 3), NA_real_),
+    zcrit = qnorm(0.975),  # 95% CI
+    ci_low  = if_else(can_ci, tanh(z - zcrit * se), NA_real_),
+    ci_high = if_else(can_ci, tanh(z + zcrit * se), NA_real_)
+  ) %>%
+dplyr::select(date, cor_score_prev, n_pairs, ci_low, ci_high)
+
+
+ggplot(cor_by_day_ci, aes(x = date, y = cor_score_prev)) +
+  geom_line(na.rm = TRUE) +
+  geom_errorbar(
+    aes(ymin = ci_low, ymax = ci_high),
+    width = 0.25,       #add horizontal caps on the ends
+    na.rm = TRUE
+  ) +
+  geom_point(aes(alpha = !is.na(ci_low)), na.rm = TRUE) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  scale_x_date(date_breaks = "1 day", date_labels = "%b %d") +
+  coord_cartesian(ylim = c(0, 1)) +   #bound y ≥ 0 without dropping data
+  labs(
+    x = "Date",
+    y = "Correlation (power vs previous)",
+    title = "Daily Power Score Correlation with 95% CIs"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+
+```
+
+
+#less conservative version of power core. Here cor is based simply on the last cal day
+```{r}
+#power
+MOPA_power_score_2021_hi_form$power <- 1 - MOPA_power_score_2021_hi_form$dom_ec
+
+#sort
+score_sort_2021 <- MOPA_power_score_2021_hi_form %>%
+  mutate(date = as.Date(date)) %>%
+  arrange(id, date)
+
+#use the last previous observation for that id (ignore calendar gaps)
+score_sort_2021 <- score_sort_2021 %>%
+  group_by(id) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    prev_for_corr = lag(power),                     #last time this id appeared (any earlier day)
+    ratio         = if_else(!is.na(prev_for_corr),  
+                            power / prev_for_corr, NA_real_)
+  ) %>%
+  ungroup()
+
+#safe Pearson correlation helper
+safe_cor <- function(x, y) {
+  ok <- complete.cases(x, y)
+  if (sum(ok) < 2) return(NA_real_)  # not enough pairs
+  cor(x[ok], y[ok])
+}
+
+#correlation by date. power today vs last previous for that id
+cor_by_day <- score_sort_2021 %>%
+  group_by(date) %>%
+  summarize(
+    cor_score_prev = safe_cor(power, prev_for_corr),
+    n_pairs        = sum(complete.cases(power, prev_for_corr)),
+    .groups = "drop"
+  )
+
+#95% CI for r (needs n >= 4)
+cor_by_day_ci <- cor_by_day %>%
+  mutate(
+    can_ci = is.finite(cor_score_prev) & n_pairs >= 4,
+    r_clamped = pmin(pmax(cor_score_prev, -0.999999), 0.999999),
+    z = if_else(can_ci, atanh(r_clamped), NA_real_),
+    se = if_else(can_ci, 1 / sqrt(n_pairs - 3), NA_real_),
+    zcrit = qnorm(0.975),
+    ci_low  = if_else(can_ci, tanh(z - zcrit * se), NA_real_),
+    ci_high = if_else(can_ci, tanh(z + zcrit * se), NA_real_)
+  ) %>%
+  dplyr::select(date, cor_score_prev, n_pairs, ci_low, ci_high)
+
+
+
+
+all_dates <- sort(unique(cor_by_day_ci$date))
+
+ggplot(cor_by_day_ci, aes(x = date, y = cor_score_prev)) +
+  #subtle vertical guide at each date
+  geom_vline(xintercept = all_dates, linewidth = 0.25, alpha = 0.15) +
+  geom_line(na.rm = TRUE) +
+  geom_errorbar(
+    aes(ymin = pmax(ci_low, 0), ymax = ci_high), # clamp lower CI at 0 to match  y bound
+    width = 0.25,
+    na.rm = TRUE
+  ) +
+  geom_point(aes(alpha = !is.na(ci_low)), size = 2, na.rm = TRUE) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  #put a tick at every data date and label it
+  scale_x_date(
+    breaks = all_dates,
+    date_labels = "%b %d",
+    expand = expansion(mult = c(0.001, 0.001))  # tiny padding so endpoints aren’t flush
+  ) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Date",
+    y = "Correlation (power vs previous)",
+    title = "Daily Power Score Correlation with 95% CIs"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.ticks.x = element_line(linewidth = 0.6),
+    axis.ticks.length.x = unit(3, "pt"),
+    panel.grid.minor.x = element_blank()
+  )
+
+
+
+```
+#power comparison linear regression
+```{r}
+library(tidyverse)
+library(lubridate)
+library(broom)
+
+
+#calculate power and make it z scored
+library(tidyverse)
+library(lubridate)
+library(broom)
+
+score_sort_2021 <- MOPA_power_score_2021_hi_form %>%
+  mutate(
+    date  = as.Date(date),
+    power = 1 - dom_ec
+  ) %>%
+  arrange(id, date) %>%
+  group_by(date) %>%
+  mutate(power_z = as.numeric(scale(power))) %>%   # z-score within day
+  ungroup()
+
+#Pair each bird’s power with its own last previous observation
+score_sort_2021 <- score_sort_2021 %>%
+  group_by(id) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(prev_power = lag(power_z)) %>%
+  ungroup()
+
+#Per day regressions: power_z ~ prev_power
+reg_by_day <- score_sort_2021 %>%
+  group_by(date) %>%
+  group_modify(~{
+    d <- .x %>% filter(complete.cases(power_z, prev_power))
+    n <- nrow(d)
+    if (n < 3) {
+      return(tibble(
+        slope = NA_real_, se = NA_real_,
+        conf.low = NA_real_, conf.high = NA_real_,
+        p.value = NA_real_, n_pairs = n
+      ))
+    }
+    mod <- lm(power_z ~ prev_power, data = d)
+    s   <- broom::tidy(mod, conf.int = TRUE) %>% filter(term == "prev_power")
+    tibble(
+      slope    = s$estimate,
+      se       = s$std.error,
+      conf.low = s$conf.low,
+      conf.high= s$conf.high,
+      p.value  = s$p.value,
+      n_pairs  = n
+    )
+  }) %>%
+  ungroup()
+
+
+
+
+library(tidyverse)
+library(lubridate)
+library(patchwork)   
+
+# assumes reg_by_day already contains date, slope, conf.low, conf.high, p.value
+
+#sequential day index & gap shading
+reg_by_day <- reg_by_day %>%
+  arrange(date) %>%
+  mutate(day_idx = row_number(),
+         day_lab = paste0("Day ", day_idx))
+
+all_dates <- reg_by_day$date
+gap_pos   <- which(as.integer(diff(all_dates)) > 1)
+
+gap_rects <- tibble(
+  xmin = gap_pos + 0.5 - 0.48,
+  xmax = gap_pos + 0.5 + 0.48
+)
+
+#line plot with grey gap shading and red sig points
+
+p_line <- ggplot(reg_by_day, aes(x = day_idx, y = slope)) +
+  { if (nrow(gap_rects) > 0)
+      geom_rect(data = gap_rects,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE,
+                fill = "grey30", alpha = 0.5) } +
+  geom_line(na.rm = TRUE) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                width = 0.25, na.rm = TRUE) +
+  geom_point(aes(color = p.value < 0.05), size = 2, na.rm = TRUE) +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black"), guide = "none") +
+  scale_x_continuous(
+    breaks = reg_by_day$day_idx,
+    labels = reg_by_day$day_lab,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(-0.5, 1.2)) +
+  labs(x = "Day of experiment (sequential)",
+       y = expression(beta[1]*" (slope of z-scored power vs previous)")) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+    axis.title.x = element_text(margin = margin(t = 8))
+  )
+
+#compact boxplot of slopes 
+
+p_box <- ggplot(reg_by_day, aes(y = slope)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(-0.5, 1.2)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid = element_blank()
+  )
+
+#combine plots 
+
+p_line + p_box + plot_layout(widths = c(4, 0.6))
+
+
+
+
+
+
+
+
+
+
+mean_power_slope <- mean(reg_by_day$slope, na.rm = TRUE)
+sd_power_slope  <- sd(reg_by_day$slope, na.rm = TRUE)
+se_power_slope   <- sd_aggr / sqrt(sum(!is.na(reg_by_day$slope)))
+
+
+
+
+
+```
+
+
+
+#aggression per day
+```{r}
+head(aggression_for_br_ready)
+head(sessions_start_end)
+
+
+#4/21 missing start date for some reason so add manually
+
+sessions_start_end[15, "session_start"] <- "08:46:38"
+
+library(hms)
+#calculate break per day (first P2) - (last P1); 0 if P2 (or P1) missing
+
+break_by_day <- aggression_for_br_ready %>%
+  group_by(date) %>%
+  summarise(
+    p1_end   = if (any(obs_period == 1)) max(full_time[obs_period == 1], na.rm = TRUE) else hms::hms(NA_real_),
+    p2_start = if (any(obs_period == 2)) min(full_time[obs_period == 2], na.rm = TRUE) else hms::hms(NA_real_),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    break_sec   = if_else(!is.na(p1_end) & !is.na(p2_start),
+                          pmax(as.numeric(p2_start - p1_end), 0),  # never negative
+                          0),
+    break_hours = break_sec / 3600
+  ) %>%
+  dplyr::select(date, break_hours)
+
+
+sessions_start_end <- sessions_start_end %>%
+  mutate(date = as_date(mdy(as.character(date))))
+
+
+#Day duration from sessions (one row per day)
+day_hours <- sessions_start_end %>%
+  transmute(
+    date,
+    day_hours = pmax(as.numeric(session_end - session_start), 0) / 3600
+  )
+
+
+
+
+
+#Observed hours = day_hours - break_hours (min 0)
+obs_hours_day <- day_hours %>%
+  left_join(break_by_day, by = "date") %>%
+  mutate(
+    break_hours = coalesce(break_hours, 0),
+    obs_hours   = pmax(day_hours - break_hours, 0)
+  ) %>%
+  dplyr::select(date, day_hours, break_hours, obs_hours)
+
+#Events per day
+events_per_day <- aggression_for_br_ready %>%
+  group_by(date) %>%
+  summarise(n_events = n(), .groups = "drop")
+
+#Events per hour (standardized by observed hours)
+events_per_hour_day <- events_per_day %>%
+  left_join(obs_hours_day, by = "date") %>%
+  mutate(
+    events_per_hour = if_else(obs_hours > 0, n_events / obs_hours, NA_real_)
+  ) %>%
+  dplyr::select(date, n_events, day_hours, break_hours, obs_hours, events_per_hour)
+
+
+
+
+plot_df <- events_per_hour_day %>%
+  arrange(date) %>%
+  mutate(has_rate = !is.na(events_per_hour) & is.finite(events_per_hour) & obs_hours > 0)
+
+#put a faint guide at every calendar day between min/max
+all_dates <- seq(min(plot_df$date, na.rm = TRUE),
+                 max(plot_df$date, na.rm = TRUE),
+                 by = "day")
+
+#dynamic y limit. Helps to pad by 10%
+y_max <- max(plot_df$events_per_hour, na.rm = TRUE)
+if (!is.finite(y_max)) y_max <- 1
+
+
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+
+#Here we prepare sequential index, gaps, y limits
+plot_df <- plot_df %>%
+  arrange(date) %>%
+  mutate(day_idx = row_number(),
+         day_lab = paste0("Day ", day_idx))
+
+#detect calendar gaps between observed days
+gap_pos <- which(as.integer(diff(plot_df$date)) > 1)
+gap_rects <- tibble(
+  xmin = gap_pos + 0.5 - 0.48,
+  xmax = gap_pos + 0.5 + 0.48
+)
+
+y_max <- max(plot_df$events_per_hour, na.rm = TRUE)
+if (!is.finite(y_max)) y_max <- 1
+
+#left panel: line and CIs free points (alpha by has_rate) and dark gap shade 
+p_line <- ggplot(plot_df, aes(x = day_idx, y = events_per_hour)) +
+  { if (nrow(gap_rects) > 0)
+      geom_rect(data = gap_rects,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE,
+                fill = "grey30", alpha = 0.5) } +
+  geom_line(na.rm = TRUE) +
+  geom_point(aes(alpha = has_rate), size = 2, na.rm = TRUE) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  geom_hline(yintercept = mean(plot_df$events_per_hour, na.rm = TRUE),
+             linetype = "dashed") +
+  scale_x_continuous(
+    breaks = plot_df$day_idx,
+    labels = plot_df$day_lab,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, y_max * 1.10)) +
+  labs(x = "Day", y = "Events per hour") +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85")
+  )
+
+#right panel: compact boxplot of the field season’s rates
+p_box <- plot_df %>%
+  filter(is.finite(events_per_hour)) %>%
+  ggplot(aes(y = events_per_hour)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(0, y_max * 1.10)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid = element_blank()
+  )
+
+#combine
+p_line + p_box + plot_layout(widths = c(4, 0.6))
+
+
+
+#outlier test
+summary(plot_df$events_per_hour)
+boxplot.stats(plot_df$events_per_hour)$out
+
+
+mean_aggr <- mean(plot_df$events_per_hour, na.rm = TRUE)
+sd_aggr   <- sd(plot_df$events_per_hour, na.rm = TRUE)
+se_aggr   <- sd_aggr / sqrt(sum(!is.na(plot_df$events_per_hour)))
+```
+
+#Triangle transitivity
+```{r}
+
+dat <- aggression_for_br_ready %>%
+  mutate(
+    date   = as.Date(date),        
+    actor  = as.character(actor),
+    subject= as.character(subject)
+  ) %>%
+  filter(!is.na(actor), !is.na(subject), actor != subject)
+
+#Get the names of the 4 outputs from EloRating::transitivity 
+#We build a tiny 3by3 dummy to read the names; ensures consistent columns
+dummy <- matrix(c(0,1,2,
+                  0,0,1,
+                  0,0,0), nrow = 3, byrow = TRUE)
+colnames(dummy) <- rownames(dummy) <- c("A","B","C")
+out_names <- names(EloRating::transitivity(dummy))
+
+#Helper. return an NA row with the right 4 columns 
+na_row <- function() {
+  tibble(!!!setNames(rep(list(NA_real_), length(out_names)), out_names))
+}
+
+#Helper. given a day's edges, it builds a matrix and computes transitivity
+ttri_for_day <- function(df_day) {
+  if (nrow(df_day) == 0) return(na_row())
+
+  counts <- df_day %>%
+    count(actor, subject, name = "n")
+
+  birds <- union(counts$actor, counts$subject)
+  if (length(birds) < 3) return(na_row())
+
+  mat <- counts %>%
+    complete(actor = birds, subject = birds, fill = list(n = 0)) %>%
+    pivot_wider(names_from = subject, values_from = n, values_fill = 0) %>%
+    column_to_rownames("actor") %>%
+    as.matrix()
+
+  #clean up
+  diag(mat) <- 0
+  if (sum(mat) == 0) return(na_row())
+
+  res <- EloRating::transitivity(mat)      #named numeric vector 
+  #Coerce to a one-row tibble with those names
+  as_tibble_row(as.list(res))[out_names]   # keep column order consistent
+}
+
+#loop over dates and bind rows
+all_dates <- sort(unique(dat$date))
+
+tri_trans_by_day <- map_dfr(all_dates, function(d) {
+  day_res <- ttri_for_day(dat %>% filter(date == d))
+  mutate(day_res, date = d, .before = 1)
+})
+
+tri_trans_by_day
+
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+
+#tri_trans_by_day has: date, Pt, ttri, p, runs
+plot_df <- tri_trans_by_day %>%
+  transmute(
+    date = as.Date(date),
+    ttri = as.numeric(ttri),
+    p    = as.numeric(p)
+  ) %>%
+  arrange(date) %>%
+  mutate(
+    day_idx = row_number(),
+    day_lab = paste0("Day ", day_idx),
+    sig     = is.finite(p) & p < 0.05,
+    has_val = is.finite(ttri)
+  )
+
+#mark calendar gaps
+gap_pos <- which(as.integer(diff(plot_df$date)) > 1)
+gap_rects <- tibble(
+  xmin = gap_pos + 0.5 - 0.48,
+  xmax = gap_pos + 0.5 + 0.48
+)
+
+#y limits with  padding
+y_rng <- range(plot_df$ttri, na.rm = TRUE)
+if (!all(is.finite(y_rng))) y_rng <- c(-0.1, 0.1)
+pad <- max(0.05, diff(y_rng) * 0.10)
+ylim_low  <- y_rng[1] - pad
+ylim_high <- y_rng[2] + pad
+
+#left panel is ttri over sequential days (red = significant)
+p_line <- ggplot(plot_df, aes(x = day_idx, y = ttri)) +
+  { if (nrow(gap_rects) > 0)
+      geom_rect(data = gap_rects,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE,
+                fill = "grey30", alpha = 0.5) } +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(na.rm = TRUE) +
+  geom_point(aes(color = sig), size = 2, na.rm = TRUE) +
+  scale_color_manual(values = c(`TRUE` = "red", `FALSE` = "black"), guide = "none") +
+  scale_x_continuous(
+    breaks = plot_df$day_idx,
+    labels = plot_df$day_lab,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(ylim_low, ylim_high)) +
+  labs(x = "Day", y = "Triangle transitivity (ttri)") +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85")
+  )
+
+#right panel has boxplot summary of ttri
+p_box <- plot_df %>%
+  filter(is.finite(ttri)) %>%
+  ggplot(aes(y = ttri)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(ylim_low, ylim_high)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid = element_blank()
+  )
+
+#Combine
+p_line + p_box + plot_layout(widths = c(4, 0.6))
+
+
+
+
+mean_ttri <- mean(plot_df$ttri, na.rm = TRUE)
+sd_ttri  <- sd(plot_df$ttri, na.rm = TRUE)
+se_ttri  <- sd_aggr / sqrt(sum(!is.na(plot_df$ttri)))
+
+```
+
+
+
+#Aggresion network density per day
+```{r}
+#expects columns: date, actor, subject 
+dens_by_day <- aggression_for_br_ready %>%
+  mutate(
+    date   = as.Date(date),
+    actor  = as.character(actor),
+    subject= as.character(subject)
+  ) %>%
+  filter(!is.na(actor), !is.na(subject), actor != subject) %>%
+  group_by(date) %>%
+  summarise(
+    #unique individuals present that day
+    n_nodes = n_distinct(c(actor, subject)),
+    #binary directed edges that occurred that day (A to B counts once)
+    e_dir   = n_distinct(paste(actor, subject, sep = "->")),
+    e_undir = n_distinct(if_else(actor < subject,
+                                 paste(actor, subject, sep = "--"),
+                                 paste(subject, actor, sep = "--"))),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    #directed density (no self loops)
+    density_dir = if_else(n_nodes >= 2, e_dir / (n_nodes * (n_nodes - 1)), NA_real_)
+  )
+
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+
+#build plotting df from dens_by_day
+plot_df <- dens_by_day %>%
+  dplyr::select(date, density = density_dir, n_nodes, e_dir) %>%
+  arrange(date) %>%
+  mutate(has_val = !is.na(density) & is.finite(density))
+
+#sequential day index and gap shading
+plot_df <- plot_df %>%
+  mutate(day_idx = row_number(),
+         day_lab = paste0("Day ", day_idx))
+
+gap_pos <- which(as.integer(diff(plot_df$date)) > 1)
+gap_rects <- tibble(
+  xmin = gap_pos + 0.5 - 0.48,
+  xmax = gap_pos + 0.5 + 0.48
+)
+
+#outlier test 
+q1   <- quantile(plot_df$density, 0.25, na.rm = TRUE)
+q3   <- quantile(plot_df$density, 0.75, na.rm = TRUE)
+iqr  <- q3 - q1
+lower <- q1 - 1.5 * iqr
+upper <- q3 + 1.5 * iqr
+
+plot_df <- plot_df %>%
+  mutate(is_outlier = density < lower | density > upper)
+
+#console print of outliers
+plot_df %>% filter(is_outlier) %>% dplyr::select(date, day_lab, density) %>% print(n = Inf)
+
+#set y-limits
+y_max <- max(plot_df$density, na.rm = TRUE)
+if (!is.finite(y_max)) y_max <- 1
+
+#left panel: time series with dark gap shading & outliers in red
+p_line <- ggplot(plot_df, aes(x = day_idx, y = density)) +
+  { if (nrow(gap_rects) > 0)
+      geom_rect(data = gap_rects,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE,
+                fill = "grey30", alpha = 0.5) } +
+  geom_line(na.rm = TRUE) +
+  geom_point(aes(color = is_outlier, alpha = has_val), size = 2, na.rm = TRUE) +
+  scale_color_manual(values = c(`TRUE` = "red", `FALSE` = "black"), guide = "none") +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  geom_hline(yintercept = mean(plot_df$density, na.rm = TRUE), linetype = "dashed") +
+  scale_x_continuous(
+    breaks = plot_df$day_idx,
+    labels = plot_df$day_lab,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, y_max * 1.10)) +
+  labs(x = "Day", y = "Network density (directed)") +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85")
+  )
+
+#right panel: boxplot of density over the season
+p_box <- plot_df %>%
+  filter(is.finite(density)) %>%
+  ggplot(aes(y = density)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(0, y_max * 1.10)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid = element_blank()
+  )
+
+#Combine
+p_line + p_box + plot_layout(widths = c(4, 0.6))
+
+
+
+mean_density <- mean(plot_df$density, na.rm = TRUE)
+sd_density   <- sd(plot_df$density, na.rm = TRUE)
+se_density   <- sd_aggr / sqrt(sum(!is.na(plot_df$density)))
+
+```
+#plot all together
+```{r}
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+
+
+#Daily aggression (events/hour)
+
+df_aggr <- events_per_hour_day %>%
+  arrange(date) %>%
+  mutate(
+    has_rate = !is.na(events_per_hour) & is.finite(events_per_hour) & obs_hours > 0,
+    day_idx  = row_number()
+  )
+
+gap_pos_aggr  <- which(as.integer(diff(df_aggr$date)) > 1)
+gap_rects_aggr <- tibble(xmin = gap_pos_aggr + 0.5 - 0.48,
+                         xmax = gap_pos_aggr + 0.5 + 0.48)
+
+ymax_aggr <- max(df_aggr$events_per_hour, na.rm = TRUE); if (!is.finite(ymax_aggr)) ymax_aggr <- 1
+
+p_aggr_line <- ggplot(df_aggr, aes(day_idx, events_per_hour)) +
+  { if (nrow(gap_rects_aggr) > 0)
+      geom_rect(data = gap_rects_aggr,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE, fill = "grey30", alpha = 0.5) } +
+  geom_line(na.rm = TRUE) +
+  geom_point(aes(alpha = has_rate), size = 2, na.rm = TRUE) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  geom_hline(yintercept = mean(df_aggr$events_per_hour, na.rm = TRUE), linetype = "dashed") +
+  scale_x_continuous(
+    breaks = df_aggr$day_idx,
+    labels = df_aggr$day_idx,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, ymax_aggr * 1.10)) +
+  labs(x = NULL, y = "Events per hour") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 0, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+    plot.margin = margin(4, 4, 2, 4)
+  )
+
+p_aggr_box <- df_aggr %>%
+  filter(is.finite(events_per_hour)) %>%
+  ggplot(aes(y = events_per_hour)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(0, ymax_aggr * 1.10)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = margin(4, 4, 2, 0)
+  )
+
+row_aggr <- p_aggr_line + p_aggr_box + plot_layout(widths = c(4, 0.6))
+
+
+#Aggression density (directed)
+
+df_dens <- dens_by_day %>%
+  transmute(date, density = density_dir, n_nodes, e_dir) %>%
+  arrange(date) %>%
+  mutate(
+    has_val = is.finite(density),
+    day_idx = row_number()
+  )
+
+gap_pos_dens  <- which(as.integer(diff(df_dens$date)) > 1)
+gap_rects_dens <- tibble(xmin = gap_pos_dens + 0.5 - 0.48,
+                         xmax = gap_pos_dens + 0.5 + 0.48)
+
+#IQR outlier flag (red points)
+q1 <- quantile(df_dens$density, 0.25, na.rm = TRUE)
+q3 <- quantile(df_dens$density, 0.75, na.rm = TRUE)
+iqr <- q3 - q1; lo <- q1 - 1.5 * iqr; hi <- q3 + 1.5 * iqr
+df_dens <- df_dens %>% mutate(is_outlier = density < lo | density > hi)
+
+ymax_dens <- max(df_dens$density, na.rm = TRUE); if (!is.finite(ymax_dens)) ymax_dens <- 1
+
+p_dens_line <- ggplot(df_dens, aes(day_idx, density)) +
+  { if (nrow(gap_rects_dens) > 0)
+      geom_rect(data = gap_rects_dens,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE, fill = "grey30", alpha = 0.5) } +
+  geom_line(na.rm = TRUE) +
+  geom_point(aes(color = is_outlier, alpha = has_val), size = 2, na.rm = TRUE) +
+  scale_color_manual(values = c(`TRUE` = "red", `FALSE` = "black"), guide = "none") +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  geom_hline(yintercept = mean(df_dens$density, na.rm = TRUE), linetype = "dashed") +
+  scale_x_continuous(
+    breaks = df_dens$day_idx,
+    labels = df_dens$day_idx,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(0, ymax_dens * 1.10)) +
+  labs(x = NULL, y = "Network density (directed)") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 0, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+    plot.margin = margin(2, 4, 2, 4)
+  )
+
+p_dens_box <- df_dens %>%
+  filter(is.finite(density)) %>%
+  ggplot(aes(y = density)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(0, ymax_dens * 1.10)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = margin(2, 4, 2, 0)
+  )
+
+row_dens <- p_dens_line + p_dens_box + plot_layout(widths = c(4, 0.6))
+
+
+#Triangle transitivity
+
+df_ttri <- tri_trans_by_day %>%
+  transmute(date = as.Date(date), ttri = as.numeric(ttri), p = as.numeric(p)) %>%
+  arrange(date) %>%
+  mutate(
+    day_idx = row_number(),
+    sig     = is.finite(p) & p < 0.05,
+    has_val = is.finite(ttri)
+  )
+
+gap_pos_ttri  <- which(as.integer(diff(df_ttri$date)) > 1)
+gap_rects_ttri <- tibble(xmin = gap_pos_ttri + 0.5 - 0.48,
+                         xmax = gap_pos_ttri + 0.5 + 0.48)
+
+yr_t <- range(df_ttri$ttri, na.rm = TRUE); if (!all(is.finite(yr_t))) yr_t <- c(-0.1, 0.1)
+pad_t <- max(0.05, diff(yr_t) * 0.10)
+ylim_t <- c(yr_t[1] - pad_t, yr_t[2] + pad_t)
+
+p_ttri_line <- ggplot(df_ttri, aes(day_idx, ttri)) +
+  { if (nrow(gap_rects_ttri) > 0)
+      geom_rect(data = gap_rects_ttri,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE, fill = "grey30", alpha = 0.5) } +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(na.rm = TRUE) +
+  geom_point(aes(color = sig), size = 2, na.rm = TRUE) +
+  scale_color_manual(values = c(`TRUE` = "red", `FALSE` = "black"), guide = "none") +
+  scale_x_continuous(
+    breaks = df_ttri$day_idx,
+    labels = df_ttri$day_idx,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = ylim_t) +
+  labs(x = NULL, y = "Triangle transitivity (ttri)") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 0, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+    plot.margin = margin(2, 4, 2, 4)
+  )
+
+p_ttri_box <- df_ttri %>%
+  filter(is.finite(ttri)) %>%
+  ggplot(aes(y = ttri)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = ylim_t) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = margin(2, 4, 2, 0)
+  )
+
+row_ttri <- p_ttri_line + p_ttri_box + plot_layout(widths = c(4, 0.6))
+
+
+#Power stability slope (red if p<.05)
+
+df_pow <- reg_by_day %>%
+  arrange(date) %>%
+  mutate(
+    day_idx = row_number(),
+    sig     = is.finite(p.value) & p.value < 0.05
+  )
+
+gap_pos_pow  <- which(as.integer(diff(df_pow$date)) > 1)
+gap_rects_pow <- tibble(xmin = gap_pos_pow + 0.5 - 0.48,
+                        xmax = gap_pos_pow + 0.5 + 0.48)
+
+p_pow_line <- ggplot(df_pow, aes(day_idx, slope)) +
+  { if (nrow(gap_rects_pow) > 0)
+      geom_rect(data = gap_rects_pow,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                inherit.aes = FALSE, fill = "grey30", alpha = 0.5) } +
+  geom_line(na.rm = TRUE) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.25, na.rm = TRUE) +
+  geom_point(aes(color = sig), size = 2, na.rm = TRUE) +
+  scale_color_manual(values = c(`TRUE` = "red", `FALSE` = "black"), guide = "none") +
+  scale_x_continuous(
+    breaks = df_pow$day_idx,
+    labels = df_pow$day_idx,
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  coord_cartesian(ylim = c(-0.5, 1.2)) +
+  labs(x = "Day", y = expression(beta[1]*" (slope of z-scored power vs previous)")) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 0, vjust = 0.5),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+    plot.margin = margin(2, 4, 4, 4)
+  )
+
+p_pow_box <- ggplot(df_pow, aes(y = slope)) +
+  geom_boxplot(width = 0.3, fill = "grey80", color = "black", outlier.shape = 21) +
+  coord_cartesian(ylim = c(-0.5, 1.2)) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = margin(2, 4, 4, 0)
+  )
+
+row_pow <- p_pow_line + p_pow_box + plot_layout(widths = c(4, 0.6))
+
+
+#Combine all into a single figure
+final_plot <- (row_aggr / row_dens / row_ttri / row_pow) +
+  plot_layout(heights = c(1, 1, 1, 1)) +
+  plot_annotation(theme = theme(plot.margin = margin(0, 6, 0, 6)))
+
+final_plot
+
+
+
+# ggsave("daily_behavior_overview.png", final_plot, width = 12, height = 16, dpi = 300)
+
+```
+#--plot all tdr plots together
+##load dfs 
+```{r}
+
+#retal
+retal_count_length_sum_2021 <- read_csv(here("ch2 data",("retal_count_length_sum_2021.csv")))
+
+hi_form_df_piece_master_piece_retal_2021_day_by_day <- read_csv(here("ch2 data",("hi_form_df_piece_master_piece_retal_2021_day_by_day.csv")))
+
+rand_master_for_fig_retal <- read_csv(here("ch2 data",("rand_master_for_fig_retal.csv")))
+
+#pile
+pile_count_length_sum_2021 <- read_csv(here("ch2 data",("pile_count_length_sum_2021.csv")))
+
+hi_form_df_piece_master_piece_pile_2021_day_by_day <- read_csv(here("ch2 data",("hi_form_df_piece_master_piece_pile_2021_day_by_day.csv")))
+
+rand_master_for_fig_pile <- read_csv(here("ch2 data",("rand_master_for_fig_pile.csv")))
+
+
+#pass
+pass_count_length_sum_2021 <- read_csv(here("ch2 data",("pass_count_length_sum_2021.csv")))
+
+hi_form_df_piece_master_piece_pass_2021_day_by_day <- read_csv(here("ch2 data",("hi_form_df_piece_master_piece_pass_2021_day_by_day.csv")))
+
+rand_master_for_fig_pass <- read_csv(here("ch2 data",("rand_master_for_fig_pass.csv")))
+
+
+
+#opp
+opp_count_length_sum_2021 <- read_csv(here("ch2 data",("opp_count_length_sum_2021.csv")))
+
+hi_form_df_piece_master_piece_opp_2021_day_by_day <- read_csv(here("ch2 data",("hi_form_df_piece_master_piece_opp_2021_day_by_day.csv")))
+
+rand_master_for_fig_opp <- read_csv(here("ch2 data",("rand_master_for_fig_opp.csv")))
+
+
+
+#pun
+pun_count_length_sum_2021 <- read_csv(here("ch2 data",("pun_count_length_sum_2021.csv")))
+
+hi_form_df_piece_master_piece_pun_2021_day_by_day <- read_csv(here("ch2 data",("hi_form_df_piece_master_piece_pun_2021_day_by_day.csv")))
+
+rand_master_for_fig_pun <- read_csv(here("ch2 data",("rand_master_for_fig_pun.csv")))
+
+
+
+retal_sums <- hi_form_df_piece_master_piece_retal_2021_day_by_day  %>%
+  group_by(cmls)  %>%
+summarise(count=n())
+
+
+
+
+pun_sums <- hi_form_df_piece_master_piece_pun_2021_day_by_day  %>%
+  group_by(cmls)  %>%
+summarise(count=n())
+
+```
+
+##plot
+```{r}
+library(tidyverse)
+library(lubridate)
+library(patchwork)
+
+#labels & palette
+rule_names <- c(
+  retal = "Retaliation",
+  pile  = "Pile-on",
+  pass  = "Pass-along",
+  opp   = "Opportunism",
+  pun   = "Punishment"
+)
+cols_cmls <- c("More"="#d62728", "Less"="#1f77b4", "Same"="#444444")  # red, blue, dark grey
+
+#helper to normalize z_df and count cmls days
+cmls_counts <- function(z_df) {
+  z_df %>%
+    transmute(
+      date = as.Date(date),
+      cmls = factor(
+        case_when(
+          str_to_lower(cmls) == "more" ~ "More",
+          str_to_lower(cmls) == "less" ~ "Less",
+          TRUE                         ~ "Same"
+        ),
+        levels = c("More","Same","Less")
+      )
+    ) %>%
+    count(cmls, name = "days") %>%
+    tidyr::complete(cmls = factor(c("More","Same","Less"),
+                                  levels = c("More","Same","Less")),
+                    fill  = list(days = 0))
+}
+
+#compute a global y max for the side bars which are shared across rules
+side_max <- max(
+  cmls_counts(hi_form_df_piece_master_piece_retal_2021_day_by_day)$days,
+  cmls_counts(hi_form_df_piece_master_piece_pile_2021_day_by_day)$days,
+  cmls_counts(hi_form_df_piece_master_piece_pass_2021_day_by_day)$days,
+  cmls_counts(hi_form_df_piece_master_piece_opp_2021_day_by_day)$days,
+  cmls_counts(hi_form_df_piece_master_piece_pun_2021_day_by_day)$days,
+  na.rm = TRUE
+)
+#small padding so the top tick label is visible
+side_max_pad <- if (is.finite(side_max)) ceiling(side_max * 1.05) else 1
+
+#helper: one rule panel (top/bottom + right vertical summary)
+make_rule_panels_seq <- function(obs_df, z_df, rand_df, display_name, side_ymax) {
+  #Observed counts
+  obs_daily <- obs_df %>%
+    transmute(date = as.Date(date), obs_count = as.numeric(count)) %>%
+    arrange(date)
+
+  #Random tube + mean
+  rand_stats <- rand_df %>%
+    mutate(date = as.Date(date)) %>%
+    group_by(date) %>%
+    summarise(
+      min_rand  = min(count, na.rm = TRUE),
+      max_rand  = max(count, na.rm = TRUE),
+      mean_rand = mean(count, na.rm = TRUE),
+      .groups   = "drop"
+    ) %>% arrange(date)
+
+  #Z with cmls normalized to caps
+  z_use <- z_df %>%
+    transmute(
+      date = as.Date(date),
+      cmls = factor(
+        case_when(
+          str_to_lower(cmls) == "more" ~ "More",
+          str_to_lower(cmls) == "less" ~ "Less",
+          TRUE                         ~ "Same"
+        ),
+        levels = c("More","Same","Less")
+      ),
+      z_score = as.numeric(z_score)
+    ) %>% arrange(date)
+
+  #Unified dates to sequential day index
+  dates_union <- sort(unique(c(obs_daily$date, rand_stats$date, z_use$date)))
+  idx_map <- tibble(date = dates_union, day_idx = seq_along(dates_union))
+  obs_daily  <- obs_daily  %>% left_join(idx_map, by = "date")
+  rand_stats <- rand_stats %>% left_join(idx_map, by = "date")
+  z_use      <- z_use      %>% left_join(idx_map, by = "date")
+
+  #Gap shading between missing days only for the top panel
+  gap_pos <- which(as.integer(diff(dates_union)) > 1)
+  gap_rects <- tibble(xmin = gap_pos + 0.5 - 0.48,
+                      xmax = gap_pos + 0.5 + 0.48)
+
+  #Color points by cmls; color segments by right endpoint
+  obs_col <- obs_daily %>% left_join(z_use %>% dplyr::select(date, cmls), by = "date")
+  segments <- obs_col %>%
+    arrange(day_idx) %>%
+    transmute(
+      x0 = day_idx, x1 = lead(day_idx),
+      y0 = obs_count, y1 = lead(obs_count),
+      cmls_seg = lead(cmls)
+    ) %>% filter(!is.na(x1), is.finite(y0), is.finite(y1))
+
+  #ylimits for counts
+  yr <- range(c(obs_daily$obs_count, rand_stats$min_rand, rand_stats$max_rand), na.rm = TRUE)
+  if (!all(is.finite(yr))) yr <- c(0,1)
+  pad <- max(0.05, diff(yr)*0.08)
+  ylim <- c(max(0, yr[1]-pad), yr[2]+pad)
+
+  #top: counts vs random
+  p_top <- ggplot() +
+    { if (nrow(gap_rects) > 0)
+        geom_rect(data = gap_rects,
+                  aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                  inherit.aes = FALSE, fill = "grey30", alpha = 0.5) } +
+    geom_ribbon(data = rand_stats,
+                aes(x = day_idx, ymin = min_rand, ymax = max_rand),
+                fill = "grey50", alpha = 0.35) +
+    geom_line(data = rand_stats, aes(day_idx, min_rand), color = "grey51", linewidth = 0.7) +
+    geom_line(data = rand_stats, aes(day_idx, max_rand), color = "grey51", linewidth = 0.7) +
+    geom_line(data = rand_stats,
+              aes(x = day_idx, y = mean_rand),
+              linetype = "dashed", linewidth = 0.9, color = "grey15") +
+    geom_segment(data = segments,
+                 aes(x = x0, xend = x1, y = y0, yend = y1, color = cmls_seg),
+                 linewidth = 0.9, lineend = "butt", na.rm = TRUE) +
+    geom_point(data = obs_col,
+               aes(x = day_idx, y = obs_count, color = cmls),
+               size = 1.8, na.rm = TRUE) +
+    scale_color_manual(values = cols_cmls, guide = "none") +
+    scale_x_continuous(
+  breaks = idx_map$day_idx,
+  labels = idx_map$day_idx,
+  limits = c(min(idx_map$day_idx) - 0.5, max(idx_map$day_idx) + 0.5),
+  expand = c(0, 0)
+) +
+    coord_cartesian(ylim = ylim) +
+    labs(x = NULL, y = "Rule follows", title = display_name) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0, size = 14, margin = margin(b = 2)),
+      axis.text.x = element_text(angle = 0, vjust = 0.5),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+      plot.margin = margin(4, 4, 2, 6)
+    )
+
+  #bottom: z-scores
+  p_bottom <- ggplot(z_use, aes(x = day_idx, y = z_score, fill = cmls)) +
+    geom_col() +
+    geom_hline(yintercept = 0, linewidth = 0.4) +
+    scale_fill_manual(values = cols_cmls, guide = "none") +
+    scale_x_continuous(
+  breaks = idx_map$day_idx,
+  labels = idx_map$day_idx,
+  limits = c(min(idx_map$day_idx) - 0.5, max(idx_map$day_idx) + 0.5),
+  expand = c(0, 0)
+)+
+    labs(x = NULL, y = "z-score") +
+    theme_minimal(base_size = 13) +
+    theme(
+      axis.text.x = element_text(angle = 0, vjust = 0.5),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.x = element_line(linewidth = 0.25, color = "grey85"),
+      plot.margin = margin(2, 4, 2, 6)
+    )
+
+  #right vertical summary: shared y-axis across rules, show max tick
+  sum_counts <- cmls_counts(z_df) %>% mutate(cmls = fct_relevel(cmls, "More","Same","Less"))
+
+  p_side <- ggplot(sum_counts, aes(x = cmls, y = days, fill = cmls)) +
+    geom_col(width = 0.6, color = "black") +
+    scale_fill_manual(values = cols_cmls, guide = "none") +
+    scale_y_continuous(
+      limits = c(0, side_ymax),
+      breaks = scales::pretty_breaks(n = 4)(c(0, side_ymax)),
+      expand = expansion(mult = c(0, 0.04))   
+    ) +
+    labs(x = NULL, y = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x = element_blank(),          
+      axis.text.y = element_text(size = 9),   
+      axis.ticks  = element_blank(),
+      panel.grid  = element_blank(),
+      plot.margin = margin(10, 6, 6, 0)
+    )
+
+  #Combine: stacked plots + right bar
+  left_stack <- (p_top / p_bottom) + plot_layout(heights = c(2, 1))
+  p_rule <- (left_stack | p_side) + plot_layout(widths = c(4, 0.7))
+  p_rule
+}
+
+#Build panels
+p_retal <- make_rule_panels_seq(
+  retal_count_length_sum_2021,
+  hi_form_df_piece_master_piece_retal_2021_day_by_day,
+  rand_master_for_fig_retal,
+  rule_names[["retal"]],
+  side_ymax = side_max_pad
+)
+p_pile <- make_rule_panels_seq(
+  pile_count_length_sum_2021,
+  hi_form_df_piece_master_piece_pile_2021_day_by_day,
+  rand_master_for_fig_pile,
+  rule_names[["pile"]],
+  side_ymax = side_max_pad
+)
+p_pass <- make_rule_panels_seq(
+  pass_count_length_sum_2021,
+  hi_form_df_piece_master_piece_pass_2021_day_by_day,
+  rand_master_for_fig_pass,
+  rule_names[["pass"]],
+  side_ymax = side_max_pad
+)
+p_opp <- make_rule_panels_seq(
+  opp_count_length_sum_2021,
+  hi_form_df_piece_master_piece_opp_2021_day_by_day,
+  rand_master_for_fig_opp,
+  rule_names[["opp"]],
+  side_ymax = side_max_pad
+)
+p_pun <- make_rule_panels_seq(
+  pun_count_length_sum_2021,
+  hi_form_df_piece_master_piece_pun_2021_day_by_day,
+  rand_master_for_fig_pun,
+  rule_names[["pun"]],
+  side_ymax = side_max_pad
+)
+
+#Stack all vertically with tight spacing
+final_rules_plot <- (p_retal / p_pile / p_pass / p_opp / p_pun) +
+  plot_layout(heights = rep(1, 5)) +
+  plot_annotation(theme = theme(plot.margin = margin(0, 6, 0, 6)))
+
+final_rules_plot
+
+
+
+ggsave(
+  "motif_rules_plot.pdf",      
+  plot = final_rules_plot,     
+  width = 12,                   
+  height = 11,                  
+  units = "in",                 
+  dpi = 300,                   
+  bg = "white"                  
+)
+
+
+#18 by 46 portrait
+```
+
+#same but stacked bar plot
+```{r}
+library(tidyverse)
+library(patchwork)
+
+#Colors
+col_more <- "#d62728"  
+col_less <- "#1f77b4"  
+col_same <- "#444444" 
+
+#Build counts of more, same, and less for each rule
+retal_sum <- hi_form_df_piece_master_piece_retal_2021_day_by_day %>%
+  transmute(
+    cmls = case_when(
+      str_to_lower(cmls) == "more" ~ "More",
+      str_to_lower(cmls) == "less" ~ "Less",
+      TRUE                         ~ "Same"
+    )
+  ) %>%
+  mutate(cmls = factor(cmls, levels = c("More","Same","Less"))) %>%
+  count(cmls, name = "days") %>%
+  tidyr::complete(cmls = factor(c("More","Same","Less"), levels = c("More","Same","Less")),
+                  fill = list(days = 0))
+
+pile_sum <- hi_form_df_piece_master_piece_pile_2021_day_by_day %>%
+  transmute(
+    cmls = case_when(
+      str_to_lower(cmls) == "more" ~ "More",
+      str_to_lower(cmls) == "less" ~ "Less",
+      TRUE                         ~ "Same"
+    )
+  ) %>%
+  mutate(cmls = factor(cmls, levels = c("More","Same","Less"))) %>%
+  count(cmls, name = "days") %>%
+  tidyr::complete(cmls = factor(c("More","Same","Less"), levels = c("More","Same","Less")),
+                  fill = list(days = 0))
+
+pass_sum <- hi_form_df_piece_master_piece_pass_2021_day_by_day %>%
+  transmute(
+    cmls = case_when(
+      str_to_lower(cmls) == "more" ~ "More",
+      str_to_lower(cmls) == "less" ~ "Less",
+      TRUE                         ~ "Same"
+    )
+  ) %>%
+  mutate(cmls = factor(cmls, levels = c("More","Same","Less"))) %>%
+  count(cmls, name = "days") %>%
+  tidyr::complete(cmls = factor(c("More","Same","Less"), levels = c("More","Same","Less")),
+                  fill = list(days = 0))
+
+opp_sum <- hi_form_df_piece_master_piece_opp_2021_day_by_day %>%
+  transmute(
+    cmls = case_when(
+      str_to_lower(cmls) == "more" ~ "More",
+      str_to_lower(cmls) == "less" ~ "Less",
+      TRUE                         ~ "Same"
+    )
+  ) %>%
+  mutate(cmls = factor(cmls, levels = c("More","Same","Less"))) %>%
+  count(cmls, name = "days") %>%
+  tidyr::complete(cmls = factor(c("More","Same","Less"), levels = c("More","Same","Less")),
+                  fill = list(days = 0))
+
+pun_sum <- hi_form_df_piece_master_piece_pun_2021_day_by_day %>%
+  transmute(
+    cmls = case_when(
+      str_to_lower(cmls) == "more" ~ "More",
+      str_to_lower(cmls) == "less" ~ "Less",
+      TRUE                         ~ "Same"
+    )
+  ) %>%
+  mutate(cmls = factor(cmls, levels = c("More","Same","Less"))) %>%
+  count(cmls, name = "days") %>%
+  tidyr::complete(cmls = factor(c("More","Same","Less"), levels = c("More","Same","Less")),
+                  fill = list(days = 0))
+
+#Shared y max
+side_max <- max(retal_sum$days, pile_sum$days, pass_sum$days, opp_sum$days, pun_sum$days, na.rm = TRUE)
+side_max_pad <- if (is.finite(side_max)) ceiling(side_max * 1.05) else 1
+
+#Convert each to explicit stacked-rects (ymin/ymax per segment)
+#Order of stacking: More (bottom) -> Same -> Less (top)
+retal_stack <- retal_sum %>%
+  arrange(factor(cmls, levels = c("More","Same","Less"))) %>%
+  mutate(color = case_when(
+           cmls == "More" ~ col_more,
+           cmls == "Less" ~ col_less,
+           TRUE           ~ col_same
+         ),
+         ymin = lag(cumsum(days), default = 0),
+         ymax = cumsum(days))
+
+pile_stack <- pile_sum %>%
+  arrange(factor(cmls, levels = c("More","Same","Less"))) %>%
+  mutate(color = case_when(
+           cmls == "More" ~ col_more,
+           cmls == "Less" ~ col_less,
+           TRUE           ~ col_same
+         ),
+         ymin = lag(cumsum(days), default = 0),
+         ymax = cumsum(days))
+
+pass_stack <- pass_sum %>%
+  arrange(factor(cmls, levels = c("More","Same","Less"))) %>%
+  mutate(color = case_when(
+           cmls == "More" ~ col_more,
+           cmls == "Less" ~ col_less,
+           TRUE           ~ col_same
+         ),
+         ymin = lag(cumsum(days), default = 0),
+         ymax = cumsum(days))
+
+opp_stack <- opp_sum %>%
+  arrange(factor(cmls, levels = c("More","Same","Less"))) %>%
+  mutate(color = case_when(
+           cmls == "More" ~ col_more,
+           cmls == "Less" ~ col_less,
+           TRUE           ~ col_same
+         ),
+         ymin = lag(cumsum(days), default = 0),
+         ymax = cumsum(days))
+
+pun_stack <- pun_sum %>%
+  arrange(factor(cmls, levels = c("More","Same","Less"))) %>%
+  mutate(color = case_when(
+           cmls == "More" ~ col_more,
+           cmls == "Less" ~ col_less,
+           TRUE           ~ col_same
+         ),
+         ymin = lag(cumsum(days), default = 0),
+         ymax = cumsum(days))
+
+
+p_retal <- ggplot() +
+  geom_rect(data = retal_stack,
+            aes(xmin = 0.7, xmax = 1.3, ymin = ymin, ymax = ymax, fill = color),
+            color = "black") +
+  scale_fill_identity() +
+  scale_y_continuous(limits = c(0, side_max_pad),
+                     breaks = scales::pretty_breaks(n = 4)(c(0, side_max_pad)),
+                     expand = expansion(mult = c(0, 0.04))) +
+  labs(title = "Retaliation", x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(), axis.title = element_blank(),
+        axis.text.y = element_text(size = 9),
+        plot.title = element_text(face = "bold", hjust = 0, size = 14, margin = margin(b = 2)),
+        plot.margin = margin(10, 6, 6, 6))
+
+p_pile <- ggplot() +
+  geom_rect(data = pile_stack,
+            aes(xmin = 0.7, xmax = 1.3, ymin = ymin, ymax = ymax, fill = color),
+            color = "black") +
+  scale_fill_identity() +
+  scale_y_continuous(limits = c(0, side_max_pad),
+                     breaks = scales::pretty_breaks(n = 4)(c(0, side_max_pad)),
+                     expand = expansion(mult = c(0, 0.04))) +
+  labs(title = "Pile-on", x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(), axis.title = element_blank(),
+        axis.text.y = element_text(size = 9),
+        plot.title = element_text(face = "bold", hjust = 0, size = 14, margin = margin(b = 2)),
+        plot.margin = margin(10, 6, 6, 6))
+
+p_pass <- ggplot() +
+  geom_rect(data = pass_stack,
+            aes(xmin = 0.7, xmax = 1.3, ymin = ymin, ymax = ymax, fill = color),
+            color = "black") +
+  scale_fill_identity() +
+  scale_y_continuous(limits = c(0, side_max_pad),
+                     breaks = scales::pretty_breaks(n = 4)(c(0, side_max_pad)),
+                     expand = expansion(mult = c(0, 0.04))) +
+  labs(title = "Pass-along", x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(), axis.title = element_blank(),
+        axis.text.y = element_text(size = 9),
+        plot.title = element_text(face = "bold", hjust = 0, size = 14, margin = margin(b = 2)),
+        plot.margin = margin(10, 6, 6, 6))
+
+p_opp <- ggplot() +
+  geom_rect(data = opp_stack,
+            aes(xmin = 0.7, xmax = 1.3, ymin = ymin, ymax = ymax, fill = color),
+            color = "black") +
+  scale_fill_identity() +
+  scale_y_continuous(limits = c(0, side_max_pad),
+                     breaks = scales::pretty_breaks(n = 4)(c(0, side_max_pad)),
+                     expand = expansion(mult = c(0, 0.04))) +
+  labs(title = "Opportunism", x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(), axis.title = element_blank(),
+        axis.text.y = element_text(size = 9),
+        plot.title = element_text(face = "bold", hjust = 0, size = 14, margin = margin(b = 2)),
+        plot.margin = margin(10, 6, 6, 6))
+
+p_pun <- ggplot() +
+  geom_rect(data = pun_stack,
+            aes(xmin = 0.7, xmax = 1.3, ymin = ymin, ymax = ymax, fill = color),
+            color = "black") +
+  scale_fill_identity() +
+  scale_y_continuous(limits = c(0, side_max_pad),
+                     breaks = scales::pretty_breaks(n = 4)(c(0, side_max_pad)),
+                     expand = expansion(mult = c(0, 0.04))) +
+  labs(title = "Punishment", x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(), axis.title = element_blank(),
+        axis.text.y = element_text(size = 9),
+        plot.title = element_text(face = "bold", hjust = 0, size = 14, margin = margin(b = 2)),
+        plot.margin = margin(10, 6, 6, 6))
+
+#Arrange vertically
+final_rules_bars <- (p_retal / p_pile / p_pass / p_opp / p_pun) +
+  plot_layout(heights = rep(1, 5)) +
+  plot_annotation(theme = theme(plot.margin = margin(0, 6, 0, 6)))
+
+final_rules_bars
+
+
+
+
+
+
+library(tidyverse)
+
+#vcombine the five *_sum tibbles and tag the rule
+sum_all <- bind_rows(
+  retal_sum %>% mutate(rule = "Retaliation"),
+  pile_sum  %>% mutate(rule = "Pile-on"),
+  pass_sum  %>% mutate(rule = "Pass-along"),
+  opp_sum   %>% mutate(rule = "Opportunism"),
+  pun_sum   %>% mutate(rule = "Punishment")
+) %>%
+  mutate(
+    #enforce consistent order for stacking and legend
+    cmls = factor(as.character(cmls), levels = c("More","Same","Less")),
+    rule = factor(rule, levels = c("Retaliation","Pile-on","Pass-along","Opportunism","Punishment"))
+  )
+
+# shared y-cap across facets
+y_cap <- ceiling(max(sum_all %>% group_by(rule) %>% summarise(tot = sum(days)) %>% pull(tot), 1) * 1.05)
+
+#faceted stacked bars: one facet per rule, one stacked bar inside each facet
+ggplot(sum_all, aes(x = factor(""), y = days, fill = cmls)) +
+  geom_col(width = 0.6, color = "black") +
+  scale_fill_manual(
+    values = c("More"="#d62728", "Same"="#444444", "Less"="#1f77b4"),
+    breaks = c("More","Same","Less"),
+    name = NULL
+  ) +
+  facet_wrap(~ rule, ncol = 1) +  #stack vertically
+  scale_y_continuous(limits = c(0, y_cap), expand = expansion(mult = c(0, 0.04))) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold", hjust = 0),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid  = element_blank()
+  )
+#4 by 8
+```
+
+#plot all together
+```{r}
+#MAKE SURE YOU ONLY RUN THIS ONE IF YOU WANT ALL TOGETHER. RUNNING INDIVIDUAL PLOTS BEFORE MESSES UP THE AGGRESSION PER BIN PLOT
+#or just run this first
+sessions_start_end <- read_csv(here("ch2 data","Observation_Hours_Log_2021.csv "))
+
+aggression_for_br_ready <- aggression_for_br_ready %>%
+  mutate(date = as.Date(date), full_time = hms::as_hms(full_time))
+
+
+sessions_start_end <- sessions_start_end %>%
+  mutate(
+    date = as_date(mdy(as.character(date))),      
+    session_start = hms::as_hms(session_start),
+    session_end   = hms::as_hms(session_end)
+  )
+ 
+
+break_by_day <- aggression_for_br_ready %>%
+  group_by(date) %>%
+  summarise(
+    p1_end   = if (any(obs_period == 1)) max(full_time[obs_period == 1], na.rm = TRUE) else hms::hms(NA_real_),
+    p2_start = if (any(obs_period == 2)) min(full_time[obs_period == 2], na.rm = TRUE) else hms::hms(NA_real_),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    break_sec   = if_else(!is.na(p1_end) & !is.na(p2_start), pmax(as.numeric(p2_start - p1_end), 0), 0),
+    break_hours = break_sec / 3600
+  ) %>% dplyr::select(date, break_hours)
+
+day_hours <- sessions_start_end %>%
+  transmute(date, day_hours = pmax(as.numeric(session_end - session_start), 0) / 3600)
+
+obs_hours_day <- day_hours %>%
+  left_join(break_by_day, by = "date") %>%
+  mutate(break_hours = coalesce(break_hours, 0),
+         obs_hours   = pmax(day_hours - break_hours, 0)) %>%
+  dplyr::select(date, day_hours, break_hours, obs_hours)
+
+#Events/hour by bin (sum hours across the bin’s days)
+bin_days <- aggression_for_br_ready %>% distinct(bin, date)
+
+obs_hours_by_bin <- bin_days %>%
+  left_join(obs_hours_day, by = "date") %>%
+  group_by(bin) %>%
+  summarise(total_obs_hours = sum(obs_hours, na.rm = TRUE),
+            n_days = n_distinct(date), .groups = "drop")
+
+events_by_bin <- aggression_for_br_ready %>%
+  group_by(bin) %>% summarise(n_events = n(), .groups = "drop")
+
+rates_by_bin <- events_by_bin %>%
+  left_join(obs_hours_by_bin, by = "bin") %>%
+  mutate(events_per_hour = if_else(total_obs_hours > 0, n_events / total_obs_hours, NA_real_)) %>%
+  arrange(bin)
+
+#Plot P1b
+p1b_df <- rates_by_bin %>%
+  mutate(bin_f = factor(bin, levels = sort(unique(bin))),
+         bin_idx = as.integer(bin_f))
+bins_idx <- seq_len(nrow(p1b_df))
+y1b_max <- max(p1b_df$events_per_hour, na.rm = TRUE); if (!is.finite(y1b_max)) y1b_max <- 1
+p1b_mean <- mean(p1b_df$events_per_hour, na.rm = TRUE)
+
+p1b <- ggplot(p1b_df, aes(x = bin_idx, y = events_per_hour)) +
+  geom_vline(xintercept = bins_idx, linewidth = 0.25, alpha = 0.15) +
+  geom_line(aes(group = 1), na.rm = TRUE) +
+  geom_point(size = 2, na.rm = TRUE) +
+  geom_hline(yintercept = p1b_mean, linetype = "dashed") +
+  scale_x_continuous(breaks = bins_idx, labels = levels(p1b_df$bin_f),
+                     expand = expansion(mult = c(0.001, 0.001))) +
+  coord_cartesian(ylim = c(0, y1b_max * 1.10)) +
+  labs(x = "Bin", y = "Events per hour",
+       title = "Events per Hour by Bin (break-aware hours summed)") +
+  theme_minimal(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 90),
+        axis.ticks.x = element_line(linewidth = 0.6),
+        axis.ticks.length.x = grid::unit(3, "pt"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_line(linewidth = 0.25))
+
+#Mean daily density by bin
+dens_day_bin <- aggression_for_br_ready %>%
+  mutate(actor = as.character(actor), subject = as.character(subject)) %>%
+  filter(!is.na(bin), !is.na(actor), !is.na(subject), actor != subject) %>%
+  group_by(date, bin) %>%
+  summarise(n_nodes = n_distinct(c(actor, subject)),
+            e_dir   = n_distinct(paste(actor, subject, sep = "->")),
+            .groups = "drop") %>%
+  mutate(density_dir = if_else(n_nodes >= 2, e_dir / (n_nodes * (n_nodes - 1)), NA_real_))
+
+dens_by_bin_avg <- dens_day_bin %>%
+  group_by(bin) %>%
+  summarise(days_observed = n_distinct(date),
+            mean_density  = mean(density_dir, na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(bin)
+
+#Plot P2b
+p2b_df <- dens_by_bin_avg %>%
+  mutate(bin_f = factor(bin, levels = sort(unique(bin))),
+         bin_idx = as.integer(bin_f))
+bins_idx2 <- seq_len(nrow(p2b_df))
+y2b_max <- max(p2b_df$mean_density, na.rm = TRUE); if (!is.finite(y2b_max)) y2b_max <- 1
+p2b_mean <- mean(p2b_df$mean_density, na.rm = TRUE)
+
+p2b <- ggplot(p2b_df, aes(x = bin_idx, y = mean_density)) +
+  geom_vline(xintercept = bins_idx2, linewidth = 0.25, alpha = 0.15) +
+  geom_line(aes(group = 1), na.rm = TRUE) +
+  geom_point(size = 2, na.rm = TRUE) +
+  geom_hline(yintercept = p2b_mean, linetype = "dashed") +
+  scale_x_continuous(breaks = bins_idx2, labels = levels(p2b_df$bin_f),
+                     expand = expansion(mult = c(0.001, 0.001))) +
+  coord_cartesian(ylim = c(0, y2b_max * 1.10)) +
+  labs(x = "Bin", y = "Network density (directed, daily mean)",
+       title = "Aggression Network Density by Bin (mean of daily)") +
+  theme_minimal(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 90),
+        axis.ticks.x = element_line(linewidth = 0.6),
+        axis.ticks.length.x = grid::unit(3, "pt"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_line(linewidth = 0.25))
+
+#Triangle transitivity by bin
+#Helper to keep EloRating colnames consistent
+dummy <- matrix(c(0,1,2, 0,0,1, 0,0,0), nrow = 3, byrow = TRUE)
+colnames(dummy) <- rownames(dummy) <- c("A","B","C")
+out_names <- names(EloRating::transitivity(dummy))
+na_row <- function() tibble(!!!setNames(rep(list(NA_real_), length(out_names)), out_names))
+
+ttri_for_subset <- function(df_sub) {
+  if (nrow(df_sub) == 0) return(na_row())
+  counts <- df_sub %>% count(actor, subject, name = "n")
+  birds  <- union(counts$actor, counts$subject)
+  if (length(birds) < 3) return(na_row())
+  mat <- counts %>%
+    complete(actor = birds, subject = birds, fill = list(n = 0)) %>%
+    pivot_wider(names_from = subject, values_from = n, values_fill = 0) %>%
+    column_to_rownames("actor") %>% as.matrix()
+  diag(mat) <- 0
+  if (sum(mat) == 0) return(na_row())
+  as_tibble_row(as.list(EloRating::transitivity(mat)))[out_names]
+}
+
+dat_edges <- aggression_for_br_ready %>%
+  mutate(actor = as.character(actor), subject = as.character(subject)) %>%
+  filter(!is.na(bin), !is.na(actor), !is.na(subject), actor != subject) %>%
+  dplyr::select(bin, actor, subject)
+
+all_bins <- sort(unique(dat_edges$bin))
+tri_trans_by_bin <- map_dfr(all_bins, function(b) {
+  res <- ttri_for_subset(dat_edges %>% filter(bin == b))
+  mutate(res, bin = b, .before = 1)
+})
+
+p3b_df <- tri_trans_by_bin %>%
+  mutate(bin_f = factor(bin, levels = sort(unique(bin))),
+         bin_idx = as.integer(bin_f),
+         Pt = as.numeric(Pt),
+         ttri = as.numeric(ttri)) %>%
+  dplyr::select(bin_f, bin_idx, Pt, ttri) %>%
+  pivot_longer(cols = c(Pt, ttri), names_to = "metric", values_to = "value") %>%
+  arrange(metric, bin_idx) %>%
+  mutate(has_val = !is.na(value) & is.finite(value))
+
+baselines_b <- tibble(metric = c("Pt", "ttri"), baseline = c(0.75, 0))
+bins_idx3 <- seq_len(length(levels(p3b_df$bin_f)))
+
+p3b <- ggplot(p3b_df, aes(x = bin_idx, y = value)) +
+  geom_vline(xintercept = bins_idx3, linewidth = 0.25, alpha = 0.15) +
+  geom_line(aes(group = metric), na.rm = TRUE) +
+  geom_point(aes(alpha = has_val), size = 2, na.rm = TRUE) +
+  scale_alpha_manual(values = c(`TRUE` = 1, `FALSE` = 0.5), guide = "none") +
+  geom_hline(data = baselines_b, aes(yintercept = baseline), linetype = "dashed") +
+  scale_x_continuous(breaks = bins_idx3,
+                     labels = levels(p3b_df$bin_f),
+                     expand = expansion(mult = c(0.001, 0.001))) +
+  facet_wrap(~ metric, ncol = 1, scales = "free_y") +
+  labs(x = "Bin", y = NULL,
+       title = "Triangle Transitivity by Bin (Pt baseline 0.75; ttri baseline 0)") +
+  theme_minimal(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 90),
+        axis.ticks.x = element_line(linewidth = 0.6),
+        axis.ticks.length.x = grid::unit(3, "pt"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_line(linewidth = 0.25))
+
+#Power correlation by bin
+safe_cor <- function(x, y) {
+  ok <- stats::complete.cases(x, y)
+  if (sum(ok) < 2) NA_real_ else stats::cor(x[ok], y[ok])
+}
+
+stopifnot(exists("MOPA_power_score_2021_hi_form"))
+power_bin <- MOPA_power_score_2021_hi_form %>%
+  mutate(power = 1 - dom_ec) %>%
+  filter(!is.na(id), !is.na(bin), !is.na(power)) %>%
+  group_by(id, bin) %>%                                   # ensure 1 value per id×bin
+  summarise(power = mean(power, na.rm = TRUE), .groups = "drop")
+
+#confirm bin order
+bin_levels <- sort(unique(power_bin$bin))
+nB <- length(bin_levels)
+
+#For each bin t (t >= 2), correlate power_t with power_{t-1} over matched IDs
+cor_by_bin_seq <- purrr::map_dfr(seq_len(nB), function(ti) {
+  b_now <- bin_levels[ti]
+  if (ti == 1) {
+    tibble(bin = b_now, n_pairs = 0L, cor_power_prevbin = NA_real_)
+  } else {
+    b_prev <- bin_levels[ti - 1]
+    now  <- power_bin %>% filter(bin == b_now)  %>% dplyr::select(id, power_now  = power)
+    prev <- power_bin %>% filter(bin == b_prev) %>% dplyr::select(id, power_prev = power)
+    pairs <- dplyr::inner_join(now, prev, by = "id")
+    tibble(
+      bin = b_now,
+      n_pairs = nrow(pairs),
+      cor_power_prevbin = safe_cor(pairs$power_now, pairs$power_prev)
+    )
+  }
+})
+
+#95% CI via Fisher z (needs n_pairs >= 4)
+cor_by_bin_seq <- cor_by_bin_seq %>%
+  mutate(
+    can_ci   = is.finite(cor_power_prevbin) & n_pairs >= 4,
+    r_clamp  = pmin(pmax(cor_power_prevbin, -0.999999), 0.999999),
+    z        = if_else(can_ci, atanh(r_clamp), NA_real_),
+    se       = if_else(can_ci, 1 / sqrt(pmax(n_pairs - 3, 1)), NA_real_),
+    zcrit    = qnorm(0.975),
+    ci_low   = if_else(can_ci, tanh(z - zcrit * se), NA_real_),
+    ci_high  = if_else(can_ci, tanh(z + zcrit * se), NA_real_)
+  )
+
+#Plot with error bars
+p4b_df <- cor_by_bin_seq %>%
+  mutate(bin_f = factor(bin, levels = bin_levels),
+         bin_idx = as.integer(bin_f))
+
+bins_idx4 <- seq_len(nrow(p4b_df))
+p4b_mean  <- mean(p4b_df$cor_power_prevbin, na.rm = TRUE)
+
+p4b <- ggplot(p4b_df, aes(x = bin_idx, y = cor_power_prevbin)) +
+  geom_vline(xintercept = bins_idx4, linewidth = 0.25, alpha = 0.15) +
+  geom_line(aes(group = 1), na.rm = TRUE) +
+  geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.25, na.rm = TRUE) +
+  geom_point(aes(size = n_pairs), na.rm = TRUE) +
+  scale_size_continuous(range = c(2, 6), guide = "none") +
+  geom_hline(yintercept = p4b_mean, linetype = "dashed") +
+  scale_x_continuous(
+    breaks = bins_idx4,
+    labels = levels(p4b_df$bin_f),
+    expand = expansion(mult = c(0.001, 0.001))
+  ) +
+  coord_cartesian(ylim = c(-1, 1)) +
+  labs(
+    x = "Bin",
+    y = "Power correlation (bin t vs bin t−1)",
+    title = "Power Correlation by Bin with 95% CIs (matched IDs)"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.ticks.x = element_line(linewidth = 0.6),
+    axis.ticks.length.x = grid::unit(3, "pt"),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25)
+  )
+
+
+#Combine with correct order
+panels  <- list(p1b, p2b, p3b, p4b)    
+heights <- c(1, 1, 1.2, 1)
+
+final_plot_bins <- patchwork::wrap_plots(plotlist = panels, ncol = 1, heights = heights) +
+  patchwork::plot_annotation(title = "Behavioural Structure by Bin")
+
+final_plot_bins
+# ggsave("behaviour_by_bin.png", final_plot_bins, width = 12, height = if (length(panels)==4) 16 else 12, dpi = 300)
+```
+

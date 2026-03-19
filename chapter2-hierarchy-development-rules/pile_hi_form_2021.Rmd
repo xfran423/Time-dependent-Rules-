@@ -1,0 +1,4436 @@
+---
+title: "pile_hi_form_2021"
+author: "Xavier Francis"
+date: "2025-09-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+## R Markdown
+#load packages
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(data.table) 
+library(ggplot2)
+library(purrr)
+library(here)
+
+```
+
+
+
+#Data cleaning chunk 1. Here and in the next several data cleaning chunks we are getting rid of duplicate observations, unknown behaviors, and dealing with undirected behaviors
+```{r}
+matrix.please<-function(x) {
+  m<-as.matrix(x[,-1])
+  rownames(m)<-x[,1]
+  m
+}
+
+
+`2021_interactions_raw` <- read_csv(here("ch2 data","2021_interactions_raw.csv"))
+raw.allbehavedata <- `2021_interactions_raw`
+
+
+
+birdIDs_capture <- read_csv(here("ch2 data","2021_birdIDs.csv")) 
+birdIDs <- birdIDs_capture %>%
+  dplyr::select(mark_id3) %>%
+  filter(mark_id3!="") # all 20 birds
+
+
+
+
+
+bird.list <- sort(unique(birdIDs$mark_id3)) # change each time
+length(bird.list)
+bird.list
+length(bird.list)
+# list of all possible dyads
+dyad.list <- expand.grid(bird.list, bird.list) #head(dyad.list)
+names(dyad.list) <- c("actor", "subject")
+dyad.list <- subset(dyad.list, actor!=subject)
+dyad.list$dyadID <- paste(dyad.list$actor, dyad.list$subject, sep="-")
+# list of days with observations
+obsday.list <- as.character(unique(raw.allbehavedata$date)) #only days with observations
+obsday.list.wday <- as.data.frame(obsday.list)
+colnames(obsday.list.wday) <- "date"
+obsday.list.wday$nday <- seq(1:length(obsday.list.wday$date))
+
+```
+
+
+
+#Data cleaning chunk 2; "other" and "unknown" behaviors
+```{r}
+behave<-raw.allbehavedata 
+unique(behave$behavior)
+# other
+behave.other<-filter(behave, behavior=="other") %>% dplyr::select(-behavior) %>%
+  rename(behavior=other) %>%
+  dplyr::select(orderkey, sessionKEY, session_start_timeStamp, date, full_time, time, actor, subject, behavior, everything())
+behave.exl.other<-filter(behave, behavior!="other") %>% 
+  dplyr::select(-other)
+behave.goodother<-bind_rows(behave.exl.other, behave.other)
+# unknown
+behave.unknown <- filter(behave.goodother, behavior=="unknown") 
+behave.unknown$behavior[behave.unknown$behavior=="unknown"] <-"unk"
+behave.unknown <- behave.unknown %>%
+  unite(behavior, behavior, unknown, sep = "_")
+behave$behavior[behave$behavior=="unk agonistic"] <-"unk_agonistic"
+behave.exl.unk<-behave.goodother %>% filter(behavior!="unknown") %>%
+  dplyr::select(-unknown)
+behave.goodunk<-bind_rows(behave.unknown, behave.exl.unk)
+behave<-behave.goodunk
+head(behave)
+
+```
+
+
+
+#Data cleaning chunk 3; prepare cleaned df
+```{r}
+# keep only observations where the actor is in the list of bird IDs
+behave.goodID <- subset(behave, actor %in% bird.list)
+# keep only observations where the actor (found above) and the subject are both in the list of bird IDs
+behave.goodID <- subset(behave.goodID, subject %in% bird.list)
+#finds n behaviors by sessionKEY, date, time, actor, subject, behavior
+behave.key <- behave.goodID %>% 
+  dplyr::group_by(sessionKEY, date, full_time,actor, subject, behavior) %>% 
+  tally() # counts behaviors that were observed within the same minute
+#finds max n behaviors per actor by date, time, and behavior type. Return just that summary
+behave.maxkey<- behave.key %>% 
+  group_by(actor, subject, date, full_time, behavior) %>%
+  slice(which.max(n)) %>% # n.aggXaggXkey if summarise, n if tally
+  ungroup()
+head(behave.maxkey)
+#finds n disps per actor by date for summarized/trimmed data
+behaveXday <- behave.maxkey %>% 
+  group_by(actor, subject, date, full_time, behavior) %>% 
+  summarise(n=sum(n))
+head(behaveXday)
+min(behaveXday$n)
+
+
+
+
+
+unique(behaveXday$behavior)
+# behaviors in long hi_format (1 event at a time)
+behaveXday.long <- behaveXday %>%
+  uncount(n) %>%
+  mutate(n=1)
+sum(behaveXday.long$n)
+sum(behaveXday$n)
+head(behaveXday.long)
+## DUPLICATE UNDIRECTED BEHAVIORS
+# filter the undirected behaviors 
+behaveXday.undirected <- behaveXday.long %>% 
+  filter(grepl(pattern="each other",tolower(behavior)))
+  
+behaveXday.undirected1 <-behaveXday.long %>%
+  filter( behavior=="s2s") # spar as well?
+behaveXday.undirected <- bind_rows(behaveXday.undirected,behaveXday.undirected1 )
+# duplicate undirected dataframe and change subject and actor
+behaveXday.undirected.dupl <- behaveXday.undirected %>%
+  rename(subject=actor, actor=subject) %>%
+  dplyr::select(actor, subject, everything())
+# bind both dataframes
+behaveXday.directed_2021.comb <- bind_rows(behaveXday.undirected, behaveXday.undirected.dupl) 
+behaveXday.undir2dir <- behaveXday.directed_2021.comb %>%
+  separate( behavior,into = c("behavior", "direction"), sep = "_") %>%
+  dplyr::select(-direction)
+unique(behaveXday.undir2dir$behavior)
+## COMBINE DATAFRAMES
+# bind to directed dataframe
+behaveXday.directed_2021 <- behaveXday.long %>% 
+  filter(!grepl(pattern="each other",tolower(behavior)) & behavior!="s2s")
+unique(behaveXday.directed_2021$behavior)
+behaveXday.directed_2021 <- bind_rows(behaveXday.directed_2021, behaveXday.undir2dir)
+behaveXday.directed_2021$behavior[behaveXday.directed_2021$behavior=="NN"] <- "nn"
+behaveXday.directed_2021$behavior[behaveXday.directed_2021$behavior=="alloP"] <- "allop"
+behaveXday.directed_2021$behavior[behaveXday.directed_2021$behavior=="allopreen"] <- "allop"
+length(behaveXday.directed_2021$actor)
+unique(behaveXday.directed_2021$behavior)
+12454 + 2587 # 15041
+head(behaveXday.directed_2021)
+
+```
+
+#Add obs session to df
+```{r}
+#add obs session
+head(behaveXday.directed_2021)
+
+behaveXday.directed_2021 <- ungroup(behaveXday.directed_2021)
+behaveXday.directed_2021 <- arrange(behaveXday.directed_2021, date, full_time)
+#procedure to add obs session
+
+#store the first row as a separate df. It will be binded back on later 
+row_1_obs <- behaveXday.directed_2021[1,]
+
+#put events side by side. This will allow us to subtract consecutive times from one another to determine whether an event took place on a separate observation session. 
+obs_period_pt_1 <- mutate(behaveXday.directed_2021, actor_2 = lead(actor),
+                          subject_2 = lead(subject),                                   
+                          full_time_2 = lead(full_time), 
+                          date2 = lead(date),
+                          behavior_2 = lead (behavior)
+                          )
+
+
+
+
+#add empty columns for observation period and date period
+obs_period_pt_1$obs_period <- NA
+obs_period_pt_1$date_period <- NA
+
+q <- 1
+
+#loop to calculate observation sessions. If consecutive events were on the same day but there was a long time between events, it is determined that the 2nd event took place in a separate observation session. The ticker goes up, and is reset if events took place on different days.changed time from 30 min to 35 minutes cuz one instance where 30 min just added an obs session by a bit
+for (i in 1:nrow(obs_period_pt_1)) {ifelse(obs_period_pt_1$date[i] == obs_period_pt_1$date2[i]
+                                           & obs_period_pt_1$full_time_2[i] - obs_period_pt_1$full_time[i] >= 2100, q <- q+1, q <- q)
+  ifelse(obs_period_pt_1$date[i] != obs_period_pt_1$date2[i], q <- 1, q <- q)
+  obs_period_pt_1$obs_period [i] <- q
+}
+
+#remove original columns and keep mutated columns. These will replace original columns
+obs_period_pt_2 <- subset(obs_period_pt_1, select = c(date2,  full_time_2, actor_2,  subject_2, behavior_2, obs_period, date_period  ))
+
+#get rid of the bottom, which will be full of NAs, as the last event in the original data does not have anything that comes after
+obs_period_pt_3 <- slice(obs_period_pt_2, 1:(n() - 1))
+
+
+#rename mutated columns with original names 
+setnames(obs_period_pt_3, old = c('date2',  'full_time_2', 'actor_2',  'subject_2','behavior_2'), 
+         new = c('date',  'full_time', 'actor',  'subject', 'behavior'))
+
+#add observation period "1" onto first row that we subseted off, as the first event in the data has to take place in obs session 1
+row_1_obs$obs_period <- 1 
+row_1_obs$date_period <- NA
+
+#ensure that row 1 matches the df
+row_1_obs_ready <-  subset(row_1_obs, select = c(date,  full_time, actor,  subject, behavior, obs_period, date_period  ))
+
+#bind first row and df together
+obs_period_pt_4 <- rbind(row_1_obs_ready, obs_period_pt_3)
+obs_period_pt_4$date_period <- paste(obs_period_pt_4$date,obs_period_pt_4$obs_period)
+
+
+unique(obs_period_pt_4$obs_period)
+
+
+
+head(obs_period_pt_4)
+```
+
+#bind bin number and rank period onto raw data
+```{r}
+# MOPA_power_score_2021 <- read_csv(here("ch2 data","MOPA_bin_rank_hi_form_2021.csv"))
+# three_day_bins_2021 <- read_csv(here("ch2 data","2021_3daybins.csv"))
+# 
+# 
+# three_day_bins_2021_just_bin.n.date <- subset(three_day_bins_2021, select = c("bin', "date"))
+# 
+# #subset for columns of interest
+# MOPA_power_score_2021_sub <- subset(MOPA_power_score_2021, select = c("bin", "id", "rank"))
+# 
+# 
+# #filter main df so that df only contains crowds and displacements
+# aggresion_sub<- filter(obs_period_pt_4, behavior %in% c("crowd","displace", "chase"))
+# 
+# 
+# 
+# #filter for study period
+# aggresion_sub <- aggresion_sub[(aggresion_sub$date >= "2021-04-05" & aggresion_sub$date <= "2021-05-18" ),]
+# 
+# 
+# head(MOPA_power_score_2021)
+# MOPA_power_score_2021_sub <- subset(MOPA_power_score_2021, select = c("bin", "id", "rank"))
+# 
+# 
+# #bind phase df and rank df onto main aggression df
+# aggresion_sub_pt2 <- aggresion_sub %>%
+#   left_join(three_day_bins_2021_just_bin.n.date, by = c("date")) %>%
+#   arrange(date, full_time) %>%
+#   left_join(MOPA_power_score_2021_sub, by = c("bin", "actor"= "id")) %>%
+#   rename(actor_rank = rank, actor_power = power) %>%
+#   left_join(MOPA_power_score_2021_sub, by = c("bin", "subject"= "id")) %>%
+#   rename(subject_rank = rank, subject_power = power)
+
+
+```
+
+
+
+
+
+
+
+
+#day version bind bin number and rank on data 
+```{r}
+MOPA_power_score_2021 <- read_csv(here("ch3 data","MOPA_date_rank_2021.csv"))
+three_day_bins_2021 <- read_csv(here("ch2 data","2021_3daybins.csv"))
+#calculate power
+MOPA_power_score_2021$power <- 1 - MOPA_power_score_2021$dom_ec
+
+three_day_bins_2021_just_bin.n.date <- subset(three_day_bins_2021, select = c("bin", "date"))
+
+
+#subset for columns of interest
+MOPA_power_score_2021_sub <- subset(MOPA_power_score_2021, select = c("date", "id", "power", "rank"))
+
+
+#filter main df so that df only contains crowds and displacements
+aggresion_sub<- filter(obs_period_pt_4, behavior %in% c("crowd","displace", "chase"))
+
+
+
+#filter for study period
+aggresion_sub <- aggresion_sub[(aggresion_sub$date >= "2021-04-05	" & aggresion_sub$date <= "2021-05-18" ),]
+
+
+
+
+#bindrank df onto main aggression df 
+aggression_sub_pt2 <- aggresion_sub %>% 
+  left_join(three_day_bins_2021_just_bin.n.date, by = c("date")) %>%
+  arrange(date, full_time) %>% 
+  left_join(MOPA_power_score_2021_sub, by = c("date", "actor"= "id")) %>%
+  rename(actor_rank = rank, actor_power = power) %>%
+  left_join(MOPA_power_score_2021_sub, by = c("date", "subject"= "id")) %>%
+  rename(subject_rank = rank, subject_power = power)
+
+```
+
+
+
+#prepare df for rule detecting
+```{r}
+
+aggression_sub_pt2$actor_rank <- as.numeric(aggression_sub_pt2$actor_rank)
+aggression_sub_pt2$subject_rank <- as.numeric(aggression_sub_pt2$subject_rank)
+
+#here
+
+#Prepare/order & give each row an id + numeric time
+df <- aggression_sub_pt2 %>%
+  arrange(date_period, date, full_time) %>%
+  mutate(.row = row_number(),
+         tsec = as.numeric(full_time))  # seconds since midnight
+
+#Previous-by-actor (used for  base A to B within 60s check) 
+by_actor <- df %>%
+  group_by(date_period, actor) %>%
+  mutate(prev_subj_by_actor = lag(subject),
+         prev_tsec_by_actor = lag(tsec)) %>%
+  ungroup()
+
+#Last involvement time for each participant (actor OR subject) 
+# Build a long view with one entry per participant per event
+long <- bind_rows(
+  by_actor %>% transmute(date_period, .row, participant = actor, tsec),
+  by_actor %>% transmute(date_period, .row, participant = subject, tsec)
+) %>%
+  arrange(date_period, tsec, .row) %>%
+  group_by(date_period, participant) %>%
+  mutate(prev_involve_tsec = lag(tsec)) %>%
+  ungroup()
+
+#For each original row, get the most recent involvement of either A or B before this row
+last_involve <- long %>%
+  group_by(date_period, .row) %>%
+  summarise(last_involve_tsec = max(prev_involve_tsec, na.rm = TRUE), .groups = "drop") %>%
+  mutate(last_involve_tsec = ifelse(is.finite(last_involve_tsec), last_involve_tsec, NA_real_))
+
+#Apply  rule of getting rid of consecutive 60 sec possible chases
+aggression_no_repeat_custom <- by_actor %>%
+  left_join(last_involve, by = c("date_period", ".row")) %>%
+  mutate(
+    #Base repeat condition. previous by same actor is the same subject and within 60s
+    within_actor_repeat = !is.na(prev_tsec_by_actor) &
+                          subject == prev_subj_by_actor &
+                          (tsec - prev_tsec_by_actor) <= 60,
+
+    #Detect if there was an intervening event involving A or B after that previous A to B
+    interrupted_by_A_or_B = within_actor_repeat &
+                            !is.na(last_involve_tsec) &
+                            (last_involve_tsec > prev_tsec_by_actor),
+
+    keep = !within_actor_repeat | interrupted_by_A_or_B
+  ) %>%
+  filter(keep) %>%
+dplyr::select(-.row, -tsec,
+         -prev_subj_by_actor, -prev_tsec_by_actor,
+         -last_involve_tsec, -within_actor_repeat, -interrupted_by_A_or_B, -keep)
+
+
+obs <- aggression_no_repeat_custom$date_period
+
+
+dater <- unique(obs)
+datex <- c(1: length(unique(obs)))
+actorer <- unique(aggression_no_repeat_custom$actor)
+actex <- c(1:length(actorer))
+
+#sort by time and date
+pile_filt_binded_2021 <- aggression_no_repeat_custom %>%
+  arrange(aggression_no_repeat_custom$date, aggression_no_repeat_custom$full_time)
+
+
+colSums(is.na(pile_filt_binded_2021))
+
+#bottom rows of df are full of NA rows from where bird was removed or didnt aggressively interact. Checked for NAs throughout rest of df. clean through rest so removing final NA rows 
+pile_filt_binded_2021 <- na.omit(pile_filt_binded_2021)
+#to here
+ 
+
+pile_aggression_list_2021_again <- list()
+
+
+#separate data into list of each obs session each day for each obs
+for(i in datex) { 
+  output <- filter(pile_filt_binded_2021, pile_filt_binded_2021$date_period == dater[i])
+      if (nrow(output) < 1) {output [ nrow(output) + 1 , ] <- NA
+}
+  pile_aggression_list_2021_again[[i]] <- output}
+
+
+#ensure df arranged by date and time
+pile_aggression_list_2021_again <- lapply(pile_aggression_list_2021_again, function(x) arrange(x, date, full_time))
+
+
+
+
+
+#modified data frame to put consecutive events side by side
+
+pile_side_by_side <- lapply(pile_aggression_list_2021_again, function(x) mutate(x, actor_2 = lead(actor), 
+                                                                                        subject_2 = lead(subject), 
+                                                                                        full_time_2 = lead(full_time), 
+                                                                                        date2 = lead(date),
+                                                                                  actor_2_rank = lead(actor_rank),
+                                                                                  subject_2_rank = lead(subject_rank))) 
+
+
+```
+
+#Calculate time threshold
+```{r}
+dateact1 <-  c(1:length(pile_side_by_side))
+
+#rename df for calculation of time to pile in seconds
+pile_side_by_side_time_2021 <- pile_side_by_side
+
+
+#pick out pile along rule while keeping all dataframes in a list (yay!!!)
+for(i in dateact1 ) {
+  pile_side_by_side_time_2021[[i]] <- mutate(pile_side_by_side_time_2021[[i]], 
+                                           initiated =  "yes", 
+                                           rule_followed = ifelse(
+                                             subject_2 == subject
+                                             & actor != actor_2
+                                             & full_time_2 - full_time > 0
+                                             & date2 == date,
+                                             "yes","no"), time_to_pile = full_time_2 - full_time)
+  
+}
+
+
+
+
+ #combine dataframes into one huge dataframe
+ pile_time_huge_2021 <- bind_rows(pile_side_by_side_time_2021, .id = "column_label")
+ 
+ 
+ 
+
+#get df where rule was followed
+pile_time_length_hi_form_2021 <- subset(pile_time_huge_2021, rule_followed != "no")
+ 
+ #subset for columns of interest
+ pile_time_length_hi_form_2021 <- subset(pile_time_length_hi_form_2021, select = c(date, full_time, actor, subject, 
+                                                                         actor_2, subject_2, full_time_2, date2, 
+                                                                         initiated, rule_followed, time_to_pile, date_period, bin, behavior,actor_rank, subject_rank))
+ 
+
+pile_time_length_hi_form_2021$time_to_pile <- as.numeric(pile_time_length_hi_form_2021$time_to_pile)
+ 
+
+
+ggplot(pile_time_length_hi_form_2021, aes(x=time_to_pile)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=10,
+                 colour="black", fill="white") + 
+  geom_density() +   scale_x_continuous(name = "length in s of pile events", limits = c(0,3000)) 
+
+
+pile_time_length_hi_form_2021
+
+
+quantile(pile_time_length_hi_form_2021$time_to_pile, probs = c(0.25, 0.5, 0.75, .95))
+#25%   4 
+#50%   13
+#75%   46
+#95%  220
+
+```
+
+
+#calculate observed rule follows
+```{r}
+
+
+
+#loop to set conditionals to pick out pile
+
+#counter corresponds with which birds dataframe I am looking at and is used to control for false positives 
+#for example, if pile is detected for a bird A whos specific dataframe I am not looking at (im viewing bird Bs df) , this may be a false positive, as that bird A's interactions are not all listed in the dataframe of another bird B. In other words, bird A may have done something else to another bird (C, D, F etc.) that is not listed, as it would be only listed in that specific birds dataframe, that being Bird A's own dataframe
+
+dateact1 <-  c(1:length(pile_side_by_side))
+
+pile_side_by_side_thresh <- pile_side_by_side
+
+for(i in dateact1) {
+  pile_side_by_side[[i]] <- mutate(pile_side_by_side_thresh[[i]], 
+                                           initiated =  "yes", 
+                                           rule_followed = ifelse(
+                                             subject_2 == subject
+                                             & actor != actor_2
+                                             & full_time_2 - full_time <= 220  
+                                             & full_time_2 - full_time > 0
+                                             & date2 == date,
+                                             "yes","no"), time_to_pile = full_time_2 - full_time)
+} 
+
+
+
+#combine dataframes into one huge dataframe
+pilehuge_2021 <- bind_rows(pile_side_by_side, .id = "column_label")
+
+#sort by time and date
+pilehugesorted_2021 <- pilehuge_2021 %>%
+  arrange(pilehuge_2021$date, pilehuge_2021$full_time)
+
+
+
+
+#Remove duplicate events, events that have been represented twice, and events that could not confidently be counted as the start of pile
+pilehugesorted_no_dupr_2021 <- subset(pilehugesorted_2021, initiated != "no") 
+
+#subset for desired columns
+pile_no_dupr_2021 <- subset(pilehugesorted_no_dupr_2021, select = c(date, full_time, actor, subject, 
+                                                                         actor_2, subject_2, full_time_2, date2, 
+                                                                         initiated, rule_followed, time_to_pile, date_period, bin, behavior,actor_rank, subject_rank ))
+
+head(pile_no_dupr_2021)
+
+
+#determine how many time rule was follows
+pile_real_2021 <- length(which(pile_no_dupr_2021$rule_followed == "yes"))
+
+pile_real.frame_2021 <- data.frame(pile_real_2021)
+
+
+pile_real.frame_2021
+
+#create df of only rule follows
+pile_doner_all_yes_2021 <- filter(pile_no_dupr_2021, rule_followed == "yes")
+```
+
+
+
+
+
+# day level randomize order of events
+```{r}
+#randomize order of events
+
+
+#REMEMBER TO BIND THRESHOLD TO DF
+start_time <- format(Sys.time(), "%H:%M:%S")
+
+
+
+pile_obs_day_2021 <- unique(pile_filt_binded_2021$date)
+pile_count_length_list_masterframe_day_2021 <- list()
+
+pbouter = txtProgressBar(min=0, max = length(pile_obs_day_2021), style = 3)
+
+set.seed(29)
+
+for(k in pile_obs_day_2021) { 
+  runouter <- k
+  setTxtProgressBar(pbouter, k) #update progress bar
+  loop.run_outer <- paste("outer run", runouter) 
+  loop.run_outer
+  
+  pile_filt_binded_2021_rand <- subset(pile_filt_binded_2021, date == k )  
+  #remove extra columns that create spam in loop
+  pile_filt_binded_2021_rand <- subset(pile_filt_binded_2021_rand, select = c(date, full_time, actor, subject, bin, behavior, obs_period, date_period,  actor_rank, subject_rank ))
+  
+  
+  obs <- pile_filt_binded_2021_rand$date_period
+  #separate data into a list with each df=a date so we can randomize within days
+  #sort_by_date <- function(x, i, y) {y <- filter(x, date == i )
+  #mutate(y, date_counter = i)}
+  
+  datelist <- list()
+  dater <- unique(obs)
+  datex <- c(1: length(unique(obs)))
+  #boop <- filter(both_numbered_sorted, both_numbered_sorted$date == datex [2])
+  
+  #loop to create a separate dataframe for each bird that only contains interactions #pertaining to that bird.
+  #Each dataframe is stored within a list to make the dataframes easy to work with
+  #separate data into list of each obs session each day 
+  for(i in datex) { 
+    output <- filter(pile_filt_binded_2021_rand, pile_filt_binded_2021_rand$date_period == dater[i] )
+    if (nrow(output) < 1) {output [ nrow(output) + 1 , ] <- NA
+    } 
+    datelist[[paste0("list", dater[i])]] <- output}
+  
+  
+  
+  
+  #run ids should be 1 through however many times you want to run through the permutation
+  runIDs <- seq(1,1000)
+  
+  #create an empty masterframe to be filled with each run of the permutation
+  masterframe_day_pile_2021.hi_form.df <- data.frame(runIDs = character(),
+                                                 actor = character(),
+                                                 actor_rank = integer(),
+                                                 subject = character(),
+                                                 subject_rank = integer(),
+                                                 date = character(),
+                                                 full_time = integer(),
+                                                 bin = integer(),
+                                                 behavior = character(),
+                                                 actor_2 = character(),
+                                                 actor_2_rank = integer(),
+                                                 subject_2 = character(),
+                                                 subject_2_rank = integer(),
+                                                 full_time_2 = integer(),
+                                                 date2 = character(),
+                                                 counter = character(),
+                                                 initiated = character(),
+                                                 rule_followed = character(),
+                                                 time_to_pile = integer(),
+                                                 stringsAsFactors=FALSE)
+  nruns <- 1000
+  #pb = txtProgressBar(min=0, max = nruns, style = 3)
+  
+  #forloop starts here'
+  for (r in 1:length(runIDs)) { #r = 1 is a test you can uncomment to see if it works before #running it 100 times
+    #r = 1
+    run <- r
+    #setTxtProgressBar(pb, r) #update progress bar
+    loop.run <- paste("inner run", run) 
+    loop.run
+    #for example, if r = 1, looprun will say run 1 which will allow you to keep each run's #data straight
+    
+    
+    #loop.seed <- set.seed[r] didnt work so ignore. not needed
+    
+    
+    #renamed data
+    loop.datalist <- datelist
+    xorder <- c()
+    listlength <- as.numeric(length(loop.datalist))
+    datex2 <- 1:listlength
+    full_time_list <-c()
+    loop.data.randomized.time.added <- c()
+    #get rid of anything thats not actor and receiver (we will bind back on the date and time #later anyways to preserve
+    #their order)
+    
+    #remove date from each df in the list
+    #create a randomized sequence of numbers to bind to the subset data (ex. 2,6,1,3,5,4)
+    #sort the data frame to put the randomized numbers in order from 1 to whatever and voila, #the order of events has been randomized (ex. from above 1,2,3,4,5,6)
+    
+    for(i in datex2) {
+      full_time_list[[i]] <- subset(loop.datalist[[i]], select = c(full_time))
+      loop.datalist[[i]] <- subset(loop.datalist[[i]], select = -c(full_time))
+      
+      xorder[[i]] <- data.frame(xorder = sample(1:length(loop.datalist[[i]]$actor),
+                                                length(loop.datalist[[i]]$actor)))
+      loop.datalist[[i]] <- mutate(loop.datalist[[i]], 
+                                   xorderx = xorder[[i]]$xorder)
+      loop.datalist[[i]] <-
+        loop.datalist[[i]][order(loop.datalist[[i]]$xorderx),]
+      #bind time back on
+      loop.data.randomized.time.added[[i]] <- bind_cols(loop.datalist[[i]], full_time_list[[i]])
+      loop.data.randomized.time.added[[i]] <- subset(loop.data.randomized.time.added[[i]], select = -c(xorderx))
+      
+    }
+    
+    practdrlist <- loop.data.randomized.time.added
+    
+    
+
+    
+    
+    pile_2021_rand_split_by_bird_ordered <- lapply(practdrlist, function(x) arrange(x, date, full_time))
+    
+    
+    
+    
+    #modified each data frame to put consecutive events side by side
+    
+    pile_rand_test_2021 <- lapply(pile_2021_rand_split_by_bird_ordered, function(x) mutate(x, actor_2 = lead(actor), subject_2 = lead(subject), full_time_2 = lead(full_time), date2 = lead(date), actor_2_rank = lead(actor_rank), subject_2_rank = lead(subject_rank))) 
+    
+    
+    
+    
+    #successfully picked out pile rule while keeping all dataframes in a list (yay!!!)
+    #loop to set conditionals to pick out pile
+    
+    #counter corresponds with which birds dataframe I am looking at and is used to control for false positives 
+    #for example, if pile is detected for a bird whos specific dataframe I am not looking #at , this may be a false positive, as that birds interactions are not all listed in the #dataframe of another bird. In other words, the bird may have done something else to another #bird that is not listed, as it would be only listed in that specific birds dataframe
+    dateact2 <-  c(1:length(pile_rand_test_2021))
+    
+    
+    
+    
+    for(i in dateact2) {
+      pile_rand_test_2021[[i]] <- mutate(pile_rand_test_2021[[i]], 
+                                           initiated =  "yes", 
+                                           rule_followed = ifelse(
+                                             subject_2 == subject
+                                             & actor != actor_2
+                                             & full_time_2 - full_time <=  220
+                                             & full_time_2 - full_time > 0
+                                             & date2 == date,
+                                             "yes","no"), time_to_pile = full_time_2 - full_time)
+    } 
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    #combine dataframes into one huge dataframe
+    testhuge <- bind_rows(pile_rand_test_2021, .id = "column_label")
+    
+    #sort by time and date
+    testhugesorted <- testhuge %>%
+      arrange(testhuge$date, testhuge$full_time)
+    
+    
+    
+    #need to check but i think it works to get rid of all "initiated no" rows to get rid of #duplicates, as pile 
+    #is literally possible whenever an aggressive event takes place
+    #Update. It does work
+    
+    testhugesorted_no_dup <- subset(testhugesorted, initiated != "no") 
+    
+    pile_no_dup_rand_2021 <- subset(testhugesorted_no_dup, select = c(date, full_time, actor, actor_rank, subject, subject_rank, bin, behavior, actor_2, actor_2_rank, subject_2, subject_2_rank, full_time_2, date2, initiated, rule_followed, time_to_pile))
+    
+    
+    
+    
+    
+    
+    #end of pile process
+    #end of rule code
+    
+    
+    
+    #bind vector of run IDs for each run to the dataframe so that you can have a numeric run #id next to each data point
+    #that coresponds with that run which will allow you to sort/put them in ascending order later
+    runIDs <- rep(loop.run, length(pile_no_dup_rand_2021$actor))
+    
+    pile_complete <- cbind(runIDs, pile_no_dup_rand_2021)
+    
+    
+    #put each runs data into teh masterframe
+    masterframe_day_pile_2021.hi_form.df <- rbind(masterframe_day_pile_2021.hi_form.df, pile_complete)
+    
+  }
+  pile_count_length_list_masterframe_day_2021[[paste0("day", k)]] <- masterframe_day_pile_2021.hi_form.df
+}
+
+pile_count_length_list_masterframe_day_2021_binded <-  bind_rows(pile_count_length_list_masterframe_day_2021, .id = "column_label")
+
+
+end_time <- format(Sys.time(), "%H:%M:%S")
+start_time
+end_time
+
+
+#write.csv(pile_count_length_list_masterframe_day_2021_binded,  here("ch3 data","pile_countmaster_day_level_hi_form_2021_custom_thresh.csv"), row.names = FALSE)
+
+```
+
+```{r}
+
+
+#pile_count_length_list_masterframe_day_2021_binded <- read_csv(here("ch3 data",("pile_countmaster_day_level_hi_form_2021_custom_thresh.csv")))
+pile_doner_all_yes_2021
+
+head(pile_doner_all_yes_2021) 
+
+
+
+pile_count_length_sum_2021 <- pile_doner_all_yes_2021 %>% group_by( date) %>%
+  dplyr::summarize (
+    count =n())
+
+pile_count_length_sum_2021
+
+
+#write.csv(pile_count_length_sum_2021,  here("ch2 data","pile_count_length_sum_2021.csv"), row.names = FALSE)
+
+
+
+pile_dates_2021 <- unique(pile_count_length_list_masterframe_day_2021_binded$date)
+```
+
+
+
+#day1
+```{r}
+#day1
+
+current_date <- pile_dates_2021[1]
+current_date
+
+
+
+pile_count_length_list_masterframe_day_2021_binded_day1 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day1_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day_2021_binded_day1$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day_2021_binded_day1$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day_2021_binded_day1$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day1 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day1_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day1
+
+hi_form_pile_tally2021_day1 <-length(which(pile_count_length_list_2021_day1_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day1 <-   1 - hi_form_pile_tally2021_day1/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day1
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day1 <- (pile_count_length_list_2021_day1_real$count - mean_perm) / sd_perm
+
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day1 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day_2021_binded_day1$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.061 ,
+  z_score = z_score_day1,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day1 <- rbind(hi_form_df_piece_day1, new_row)
+
+```
+
+#day2
+```{r}
+#day2
+
+current_date <- pile_dates_2021[2]
+current_date
+
+
+
+pile_count_length_list_masterframe_day2_2021_binded_day2 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day2_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day2_2021_binded_day2$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day2_2021_binded_day2$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day2_2021_binded_day2$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day2 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day2_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day2
+
+hi_form_pile_tally2021_day2 <-length(which(pile_count_length_list_2021_day2_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day2 <-   1 - hi_form_pile_tally2021_day2/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day2
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day2 <- (pile_count_length_list_2021_day2_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day2 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day2_2021_binded_day2$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.115 ,
+  z_score = z_score_day2,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day2 <- rbind(hi_form_df_piece_day2, new_row)
+
+```
+
+#day3
+```{r}
+#day3
+
+current_date <- pile_dates_2021[3]
+current_date
+
+
+
+pile_count_length_list_masterframe_day3_2021_binded_day3 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day3_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day3_2021_binded_day3$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day3_2021_binded_day3$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day3_2021_binded_day3$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day3 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day3_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day3
+
+hi_form_pile_tally2021_day3 <-length(which(pile_count_length_list_2021_day3_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day3 <-   1 - hi_form_pile_tally2021_day3/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day3
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day3 <- (pile_count_length_list_2021_day3_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day3 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day3_2021_binded_day3$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.016 ,
+  z_score = z_score_day3,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day3 <- rbind(hi_form_df_piece_day3, new_row)
+
+```
+
+#day4
+```{r}
+#day4
+
+current_date <- pile_dates_2021[4]
+current_date
+
+
+
+pile_count_length_list_masterframe_day4_2021_binded_day4 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day4_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day4_2021_binded_day4$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day4_2021_binded_day4$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day4_2021_binded_day4$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day4 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day4_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day4
+
+hi_form_pile_tally2021_day4 <-length(which(pile_count_length_list_2021_day4_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day4 <-   1 - hi_form_pile_tally2021_day4/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day4
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day4 <- (pile_count_length_list_2021_day4_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day4 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day4_2021_binded_day4$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.001 ,
+  z_score = z_score_day4,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day4 <- rbind(hi_form_df_piece_day4, new_row)
+
+```
+
+#day5
+```{r}
+#day5
+
+current_date <- pile_dates_2021[5]
+current_date
+
+
+
+pile_count_length_list_masterframe_day5_2021_binded_day5 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day5_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day5_2021_binded_day5$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day5_2021_binded_day5$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day5_2021_binded_day5$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day5 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day5_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day5
+
+hi_form_pile_tally2021_day5 <-length(which(pile_count_length_list_2021_day5_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day5 <-   1 - hi_form_pile_tally2021_day5/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day5
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day5 <- (pile_count_length_list_2021_day5_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day5 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day5_2021_binded_day5$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.564 ,
+  z_score = z_score_day5,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day5 <- rbind(hi_form_df_piece_day5, new_row)
+
+```
+
+#day6
+```{r}
+#day6
+
+current_date <- pile_dates_2021[6]
+current_date
+
+
+
+pile_count_length_list_masterframe_day6_2021_binded_day6 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day6_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day6_2021_binded_day6$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day6_2021_binded_day6$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day6_2021_binded_day6$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day6 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day6_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day6
+
+hi_form_pile_tally2021_day6 <-length(which(pile_count_length_list_2021_day6_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day6 <-   1 - hi_form_pile_tally2021_day6/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day6
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day6 <- (pile_count_length_list_2021_day6_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day6 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day6_2021_binded_day6$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day6,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day6 <- rbind(hi_form_df_piece_day6, new_row)
+
+```
+
+#day7
+```{r}
+#day7
+
+current_date <- pile_dates_2021[7]
+current_date
+
+
+
+pile_count_length_list_masterframe_day7_2021_binded_day7 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day7_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day7_2021_binded_day7$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day7_2021_binded_day7$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day7_2021_binded_day7$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day7 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept =  pile_count_length_list_2021_day7_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day7
+
+hi_form_pile_tally2021_day7 <-length(which(pile_count_length_list_2021_day7_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day7 <-   1 - hi_form_pile_tally2021_day7/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day7
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day7 <- (pile_count_length_list_2021_day7_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day7 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day7_2021_binded_day7$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day7,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day7 <- rbind(hi_form_df_piece_day7, new_row)
+
+```
+
+#day8
+```{r}
+#day8
+
+current_date <- pile_dates_2021[8]
+current_date
+
+
+
+pile_count_length_list_masterframe_day8_2021_binded_day8 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day8_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day8_2021_binded_day8$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day8_2021_binded_day8$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day8_2021_binded_day8$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day8 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day8_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day8
+
+hi_form_pile_tally2021_day8 <-length(which(pile_count_length_list_2021_day8_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day8 <-   1 - hi_form_pile_tally2021_day8/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day8
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day8 <- (pile_count_length_list_2021_day8_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day8 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day8_2021_binded_day8$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.001 ,
+  z_score = z_score_day8,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day8 <- rbind(hi_form_df_piece_day8, new_row)
+
+```
+
+#day9
+```{r}
+#day9
+
+current_date <- pile_dates_2021[9]
+current_date
+
+
+
+pile_count_length_list_masterframe_day9_2021_binded_day9 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day9_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day9_2021_binded_day9$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day9_2021_binded_day9$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day9_2021_binded_day9$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day9 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day9_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day9
+
+hi_form_pile_tally2021_day9 <-length(which(pile_count_length_list_2021_day9_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day9 <-   1 - hi_form_pile_tally2021_day9/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day9
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day9 <- (pile_count_length_list_2021_day9_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day9 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day9_2021_binded_day9$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0,
+  z_score = z_score_day9,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day9 <- rbind(hi_form_df_piece_day9, new_row)
+
+```
+
+#day10
+```{r}
+#day10
+
+current_date <- pile_dates_2021[10]
+current_date
+
+
+
+pile_count_length_list_masterframe_day10_2021_binded_day10 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day10_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day10_2021_binded_day10$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day10_2021_binded_day10$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day10_2021_binded_day10$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day10 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day10_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day10
+
+hi_form_pile_tally2021_day10 <-length(which(pile_count_length_list_2021_day10_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day10 <-   1 - hi_form_pile_tally2021_day10/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day10
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day10 <- (pile_count_length_list_2021_day10_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day10 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day10_2021_binded_day10$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.181 ,
+  z_score = z_score_day10,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day10 <- rbind(hi_form_df_piece_day10, new_row)
+
+```
+
+#day11
+```{r}
+#day11
+
+current_date <- pile_dates_2021[11]
+current_date
+
+
+
+pile_count_length_list_masterframe_day11_2021_binded_day11 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day11_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day11_2021_binded_day11$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day11_2021_binded_day11$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day11_2021_binded_day11$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day11 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day11_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day11
+
+hi_form_pile_tally2021_day11 <-length(which(pile_count_length_list_2021_day11_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day11 <-   1 - hi_form_pile_tally2021_day11/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day11
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day11 <- (pile_count_length_list_2021_day11_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day11 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day11_2021_binded_day11$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.001 ,
+  z_score = z_score_day11,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day11 <- rbind(hi_form_df_piece_day11, new_row)
+
+```
+
+#day12
+```{r}
+#day12
+
+current_date <- pile_dates_2021[12]
+current_date
+
+
+
+pile_count_length_list_masterframe_day12_2021_binded_day12 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day12_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day12_2021_binded_day12$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day12_2021_binded_day12$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day12_2021_binded_day12$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day12 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day12_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day12
+
+hi_form_pile_tally2021_day12 <-length(which(pile_count_length_list_2021_day12_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day12 <-   1 - hi_form_pile_tally2021_day12/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day12
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day12 <- (pile_count_length_list_2021_day12_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day12 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day12_2021_binded_day12$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.015 ,
+  z_score = z_score_day12,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day12 <- rbind(hi_form_df_piece_day12, new_row)
+
+```
+
+#day13
+```{r}
+#day13
+
+current_date <- pile_dates_2021[13]
+current_date
+
+
+
+pile_count_length_list_masterframe_day13_2021_binded_day13 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day13_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day13_2021_binded_day13$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day13_2021_binded_day13$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day13_2021_binded_day13$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day13 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day13_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day13
+
+hi_form_pile_tally2021_day13 <-length(which(pile_count_length_list_2021_day13_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day13 <-   1 - hi_form_pile_tally2021_day13/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day13
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day13 <- (pile_count_length_list_2021_day13_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day13 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day13_2021_binded_day13$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls =0.001 ,
+  z_score = z_score_day13,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day13 <- rbind(hi_form_df_piece_day13, new_row)
+
+```
+
+#day14
+```{r}
+#day14
+
+current_date <- pile_dates_2021[14]
+current_date
+
+
+
+pile_count_length_list_masterframe_day14_2021_binded_day14 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day14_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day14_2021_binded_day14$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day14_2021_binded_day14$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day14_2021_binded_day14$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day14 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day14_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day14
+
+hi_form_pile_tally2021_day14 <-length(which(pile_count_length_list_2021_day14_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day14 <-   1 - hi_form_pile_tally2021_day14/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day14
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day14 <- (pile_count_length_list_2021_day14_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day14 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day14_2021_binded_day14$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day14,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day14 <- rbind(hi_form_df_piece_day14, new_row)
+
+```
+
+#day15
+```{r}
+#day15
+
+current_date <- pile_dates_2021[15]
+current_date
+
+
+
+pile_count_length_list_masterframe_day15_2021_binded_day15 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day15_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day15_2021_binded_day15$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day15_2021_binded_day15$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day15_2021_binded_day15$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day15 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day15_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day15
+
+hi_form_pile_tally2021_day15 <-length(which(pile_count_length_list_2021_day15_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day15 <-   1 - hi_form_pile_tally2021_day15/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day15
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day15 <- (pile_count_length_list_2021_day15_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day15 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day15_2021_binded_day15$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.058 ,
+  z_score = z_score_day15,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day15 <- rbind(hi_form_df_piece_day15, new_row)
+
+```
+
+#day16
+```{r}
+#day16
+
+current_date <- pile_dates_2021[16]
+current_date
+
+
+
+pile_count_length_list_masterframe_day16_2021_binded_day16 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day16_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day16_2021_binded_day16$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day16_2021_binded_day16$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day16_2021_binded_day16$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day16 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day16_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day16
+
+hi_form_pile_tally2021_day16 <-length(which(pile_count_length_list_2021_day16_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day16 <-   1 - hi_form_pile_tally2021_day16/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day16
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day16 <- (pile_count_length_list_2021_day16_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day16 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day16_2021_binded_day16$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.013 ,
+  z_score = z_score_day16,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day16 <- rbind(hi_form_df_piece_day16, new_row)
+
+```
+
+#day17
+```{r}
+#day17
+
+current_date <- pile_dates_2021[17]
+current_date
+
+
+
+pile_count_length_list_masterframe_day17_2021_binded_day17 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day17_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day17_2021_binded_day17$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day17_2021_binded_day17$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day17_2021_binded_day17$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day17 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day17_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day17
+
+hi_form_pile_tally2021_day17 <-length(which(pile_count_length_list_2021_day17_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day17 <-   1 - hi_form_pile_tally2021_day17/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day17
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day17 <- (pile_count_length_list_2021_day17_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day17 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day17_2021_binded_day17$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day17,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day17 <- rbind(hi_form_df_piece_day17, new_row)
+
+```
+
+#day18
+```{r}
+#day18
+
+current_date <- pile_dates_2021[18]
+current_date
+
+
+
+pile_count_length_list_masterframe_day18_2021_binded_day18 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day18_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day18_2021_binded_day18$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day18_2021_binded_day18$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day18_2021_binded_day18$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day18 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day18_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day18
+
+hi_form_pile_tally2021_day18 <-length(which(pile_count_length_list_2021_day18_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day18 <-   1 - hi_form_pile_tally2021_day18/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day18
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day18 <- (pile_count_length_list_2021_day18_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day18 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day18_2021_binded_day18$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.596 ,
+  z_score = z_score_day18,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day18 <- rbind(hi_form_df_piece_day18, new_row)
+
+```
+
+#day19
+```{r}
+#day19
+
+current_date <- pile_dates_2021[19]
+current_date
+
+
+
+pile_count_length_list_masterframe_day19_2021_binded_day19 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day19_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day19_2021_binded_day19$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day19_2021_binded_day19$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day19_2021_binded_day19$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day19 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day19_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day19
+
+hi_form_pile_tally2021_day19 <-length(which(pile_count_length_list_2021_day19_real$count> rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day19 <-   1 - hi_form_pile_tally2021_day19/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day19
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day19 <- (pile_count_length_list_2021_day19_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day19 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day19_2021_binded_day19$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.001 ,
+  z_score = z_score_day19,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day19 <- rbind(hi_form_df_piece_day19, new_row)
+
+```
+
+#day20
+```{r}
+#day20
+
+current_date <- pile_dates_2021[20]
+current_date
+
+
+
+pile_count_length_list_masterframe_day20_2021_binded_day20 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day20_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day20_2021_binded_day20$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day20_2021_binded_day20$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day20_2021_binded_day20$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day20 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day20_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day20
+
+hi_form_pile_tally2021_day20 <-length(which(pile_count_length_list_2021_day20_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day20 <-   1 - hi_form_pile_tally2021_day20/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day20
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day20 <- (pile_count_length_list_2021_day20_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day20 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day20_2021_binded_day20$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.076 ,
+  z_score = z_score_day20,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day20 <- rbind(hi_form_df_piece_day20, new_row)
+
+```
+
+#day21
+```{r}
+#day21
+
+current_date <- pile_dates_2021[21]
+current_date
+
+
+
+pile_count_length_list_masterframe_day21_2021_binded_day21 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day21_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day21_2021_binded_day21$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day21_2021_binded_day21$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day21_2021_binded_day21$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day21 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day21_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day21
+
+hi_form_pile_tally2021_day21 <-length(which(pile_count_length_list_2021_day21_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day21 <-   1 - hi_form_pile_tally2021_day21/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day21
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day21 <- (pile_count_length_list_2021_day21_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day21 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day21_2021_binded_day21$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day21,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day21 <- rbind(hi_form_df_piece_day21, new_row)
+
+```
+
+#day22
+```{r}
+#day22
+
+current_date <- pile_dates_2021[22]
+current_date
+
+
+
+pile_count_length_list_masterframe_day22_2021_binded_day22 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day22_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day22_2021_binded_day22$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day22_2021_binded_day22$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day22_2021_binded_day22$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day22 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day22_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day22
+
+hi_form_pile_tally2021_day22 <-length(which(pile_count_length_list_2021_day22_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day22 <-   1 - hi_form_pile_tally2021_day22/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day22
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day22 <- (pile_count_length_list_2021_day22_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day22 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day22_2021_binded_day22$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day22,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day22 <- rbind(hi_form_df_piece_day22, new_row)
+
+```
+
+#day23
+```{r}
+#day23
+
+current_date <- pile_dates_2021[23]
+current_date
+
+
+
+pile_count_length_list_masterframe_day23_2021_binded_day23 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day23_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day23_2021_binded_day23$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day23_2021_binded_day23$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day23_2021_binded_day23$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day23 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day23_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day23
+
+hi_form_pile_tally2021_day23 <-length(which(pile_count_length_list_2021_day23_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day23 <-   1 - hi_form_pile_tally2021_day23/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day23
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day23 <- (pile_count_length_list_2021_day23_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day23 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day23_2021_binded_day23$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day23,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day23 <- rbind(hi_form_df_piece_day23, new_row)
+
+```
+
+#day24
+```{r}
+#day24
+
+current_date <- pile_dates_2021[24]
+current_date
+
+
+
+pile_count_length_list_masterframe_day24_2021_binded_day24 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day24_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day24_2021_binded_day24$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day24_2021_binded_day24$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day24_2021_binded_day24$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day24 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day24_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day24
+
+hi_form_pile_tally2021_day24 <-length(which(pile_count_length_list_2021_day24_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day24 <-   1 - hi_form_pile_tally2021_day24/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day24
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day24 <- (pile_count_length_list_2021_day24_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day24 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day24_2021_binded_day24$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day24,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day24 <- rbind(hi_form_df_piece_day24, new_row)
+
+```
+
+#day25
+```{r}
+#day25
+
+current_date <- pile_dates_2021[25]
+current_date
+
+
+
+pile_count_length_list_masterframe_day25_2021_binded_day25 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day25_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day25_2021_binded_day25$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day25_2021_binded_day25$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day25_2021_binded_day25$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day25 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day25_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day25
+
+hi_form_pile_tally2021_day25 <-length(which(pile_count_length_list_2021_day25_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day25 <-   1 - hi_form_pile_tally2021_day25/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day25
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day25 <- (pile_count_length_list_2021_day25_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day25 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day25_2021_binded_day25$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.028 ,
+  z_score = z_score_day25,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day25 <- rbind(hi_form_df_piece_day25, new_row)
+
+```
+
+#day26
+```{r}
+#day26
+
+current_date <- pile_dates_2021[26]
+current_date
+
+
+
+pile_count_length_list_masterframe_day26_2021_binded_day26 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day26_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day26_2021_binded_day26$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day26_2021_binded_day26$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day26_2021_binded_day26$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day26 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day26_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day26
+
+hi_form_pile_tally2021_day26 <-length(which(pile_count_length_list_2021_day26_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day26 <-   1 - hi_form_pile_tally2021_day26/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day26
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day26 <- (pile_count_length_list_2021_day26_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day26 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day26_2021_binded_day26$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day26,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day26 <- rbind(hi_form_df_piece_day26, new_row)
+
+```
+
+#day27
+```{r}
+#day27
+
+current_date <- pile_dates_2021[27]
+current_date
+
+
+
+pile_count_length_list_masterframe_day27_2021_binded_day27 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day27_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day27_2021_binded_day27$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day27_2021_binded_day27$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day27_2021_binded_day27$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day27 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day27_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day27
+
+hi_form_pile_tally2021_day27 <-length(which(pile_count_length_list_2021_day27_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day27 <-   1 - hi_form_pile_tally2021_day27/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day27
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day27 <- (pile_count_length_list_2021_day27_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day27 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day27_2021_binded_day27$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day27,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day27 <- rbind(hi_form_df_piece_day27, new_row)
+
+```
+
+#day28
+```{r}
+#day28
+
+current_date <- pile_dates_2021[28]
+current_date
+
+
+
+pile_count_length_list_masterframe_day28_2021_binded_day28 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day28_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day28_2021_binded_day28$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day28_2021_binded_day28$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day28_2021_binded_day28$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day28 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day28_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day28
+
+hi_form_pile_tally2021_day28 <-length(which(pile_count_length_list_2021_day28_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day28 <-   1 - hi_form_pile_tally2021_day28/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day28
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day28 <- (pile_count_length_list_2021_day28_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day28 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day28_2021_binded_day28$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.005 ,
+  z_score = z_score_day28,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day28 <- rbind(hi_form_df_piece_day28, new_row)
+
+```
+
+#day29
+```{r}
+#day29
+
+current_date <- pile_dates_2021[29]
+current_date
+
+
+
+pile_count_length_list_masterframe_day29_2021_binded_day29 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day29_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day29_2021_binded_day29$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day29_2021_binded_day29$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day29_2021_binded_day29$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day29 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day29_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day29
+
+hi_form_pile_tally2021_day29 <-length(which(pile_count_length_list_2021_day29_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day29 <-   1 - hi_form_pile_tally2021_day29/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day29
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day29 <- (pile_count_length_list_2021_day29_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day29 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day29_2021_binded_day29$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.003 ,
+  z_score = z_score_day29,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day29 <- rbind(hi_form_df_piece_day29, new_row)
+
+```
+
+#day30
+```{r}
+#day30
+
+current_date <- pile_dates_2021[30]
+current_date
+
+
+
+pile_count_length_list_masterframe_day30_2021_binded_day30 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day30_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day30_2021_binded_day30$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day30_2021_binded_day30$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day30_2021_binded_day30$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day30 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day30_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day30
+
+hi_form_pile_tally2021_day30 <-length(which(pile_count_length_list_2021_day30_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day30 <-   1 - hi_form_pile_tally2021_day30/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day30
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day30 <- (pile_count_length_list_2021_day30_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day30 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day30_2021_binded_day30$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.004 ,
+  z_score = z_score_day30,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day30 <- rbind(hi_form_df_piece_day30, new_row)
+
+```
+
+#day31
+```{r}
+#day31
+
+current_date <- pile_dates_2021[31]
+current_date
+
+
+
+pile_count_length_list_masterframe_day31_2021_binded_day31 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day31_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day31_2021_binded_day31$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day31_2021_binded_day31$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day31_2021_binded_day31$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day31 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day31_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day31
+
+hi_form_pile_tally2021_day31 <-length(which(pile_count_length_list_2021_day31_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day31 <-   1 - hi_form_pile_tally2021_day31/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day31
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day31 <- (pile_count_length_list_2021_day31_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day31 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day31_2021_binded_day31$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day31,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day31 <- rbind(hi_form_df_piece_day31, new_row)
+
+```
+
+#day32
+```{r}
+#day32
+
+current_date <- pile_dates_2021[32]
+current_date
+
+
+
+pile_count_length_list_masterframe_day32_2021_binded_day32 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day32_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day32_2021_binded_day32$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day32_2021_binded_day32$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day32_2021_binded_day32$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day32 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day32_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day32
+
+hi_form_pile_tally2021_day32 <-length(which(pile_count_length_list_2021_day32_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day32 <-   1 - hi_form_pile_tally2021_day32/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day32
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day32 <- (pile_count_length_list_2021_day32_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day32 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day32_2021_binded_day32$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.129 ,
+  z_score = z_score_day32,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day32 <- rbind(hi_form_df_piece_day32, new_row)
+
+```
+
+#day33
+```{r}
+#day33
+
+current_date <- pile_dates_2021[33]
+current_date
+
+
+
+pile_count_length_list_masterframe_day33_2021_binded_day33 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day33_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day33_2021_binded_day33$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day33_2021_binded_day33$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day33_2021_binded_day33$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day33 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day33_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day33
+
+hi_form_pile_tally2021_day33 <-length(which(pile_count_length_list_2021_day33_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day33 <-   1 - hi_form_pile_tally2021_day33/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day33
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day33 <- (pile_count_length_list_2021_day33_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day33 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day33_2021_binded_day33$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day33,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day33 <- rbind(hi_form_df_piece_day33, new_row)
+
+```
+
+#day34
+```{r}
+#day34
+
+current_date <- pile_dates_2021[34]
+current_date
+
+
+
+pile_count_length_list_masterframe_day34_2021_binded_day34 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day34_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day34_2021_binded_day34$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day34_2021_binded_day34$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day34_2021_binded_day34$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day34 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day34_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day34
+
+hi_form_pile_tally2021_day34 <-length(which(pile_count_length_list_2021_day34_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day34 <-   1 - hi_form_pile_tally2021_day34/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day34
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day34 <- (pile_count_length_list_2021_day34_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day34 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day34_2021_binded_day34$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0 ,
+  z_score = z_score_day34,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day34 <- rbind(hi_form_df_piece_day34, new_row)
+
+```
+
+#day35
+```{r}
+#day35
+
+current_date <- pile_dates_2021[35]
+current_date
+
+
+
+pile_count_length_list_masterframe_day35_2021_binded_day35 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day35_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day35_2021_binded_day35$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day35_2021_binded_day35$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day35_2021_binded_day35$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day35 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day35_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day35
+
+hi_form_pile_tally2021_day35 <-length(which(pile_count_length_list_2021_day35_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day35 <-   1 - hi_form_pile_tally2021_day35/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day35
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day35 <- (pile_count_length_list_2021_day35_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day35 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day35_2021_binded_day35$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "same",
+  p_cmls = 0.121 ,
+  z_score = z_score_day35,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day35 <- rbind(hi_form_df_piece_day35, new_row)
+
+```
+
+#day36
+```{r}
+#day36
+
+current_date <- pile_dates_2021[36]
+current_date
+
+
+
+pile_count_length_list_masterframe_day36_2021_binded_day36 <- subset(pile_count_length_list_masterframe_day_2021_binded, date == current_date)
+
+pile_count_length_list_2021_day36_real <- subset(pile_count_length_sum_2021, date == current_date)
+
+
+
+
+#put run #s in an ascending vector
+cum_run_IDS <- unique(pile_count_length_list_masterframe_day36_2021_binded_day36$runIDs)
+
+#create empty vector for number of time the rules were followed to be stored
+random_times_pile_followed_hi_form_2021 <- c()
+
+
+#put the number of times the rule was followed into the vector for analysis 
+for (j in cum_run_IDS) {
+  len_of_piles <- length(which(pile_count_length_list_masterframe_day36_2021_binded_day36$rule_followed == "yes" & 
+                                       pile_count_length_list_masterframe_day36_2021_binded_day36$runIDs == j))
+  
+  random_times_pile_followed_hi_form_2021 <- c(random_times_pile_followed_hi_form_2021, len_of_piles)
+}
+
+#turn vector into a dataframe for analysis
+rand_pile_.frame_hi_form_2021 <- data.frame(random_times_pile_followed_hi_form_2021)
+
+#plot time (the x intercept is the # of time a rule was used in the real data, found with 
+#"pile_real <- length(which(pile_no_dupr$rule_followed == "yes"))
+#pile_real.frame <- data.frame(pile_real))"
+hi_form_pile_2021_count_plot_day36 <- ggplot(rand_pile_.frame_hi_form_2021, aes(x=random_times_pile_followed_hi_form_2021)) + 
+  geom_histogram(aes(y=..density..),      
+                 binwidth=5,
+                 colour="black", fill="grey") +
+  geom_density(lwd = 1, linetype = 1) + theme_minimal() +
+  geom_vline(xintercept = pile_count_length_list_2021_day36_real$count, colour = "red", size = 2)  + theme(axis.text = element_text(size=25),  axis.title = element_blank()) +
+  scale_x_continuous(name = "Count of pile events", breaks=seq(0, 200, 50)) +  
+  coord_cartesian(xlim = c(0, 200), ylim = c(0,.05)) +
+  scale_y_continuous( breaks = seq(0, .05, .025)) 
+
+hi_form_pile_2021_count_plot_day36
+
+hi_form_pile_tally2021_day36 <-length(which(pile_count_length_list_2021_day36_real$count > rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021 ))
+
+
+
+hi_form_ppile_tally2021_day36 <-   1 - hi_form_pile_tally2021_day36/length(rand_pile_.frame_hi_form_2021$random_times_pile_followed_hi_form_2021)
+
+hi_form_ppile_tally2021_day36
+
+#p = 
+#calculate z score
+#calculate mean and SD of permuted counts
+mean_perm <- mean(random_times_pile_followed_hi_form_2021)
+sd_perm <- sd(random_times_pile_followed_hi_form_2021)
+
+# Calculate z-score
+z_score_day36 <- (pile_count_length_list_2021_day36_real$count - mean_perm) / sd_perm
+
+
+#create df to store important data for later stats and figures. to be binded later
+hi_form_df_piece_day36 <- data.frame(group = integer(),
+                                    bin = integer(),
+                                    date =  character(),
+                                    rule = character(),
+                                    cmls = character(),
+                                    p_cmls = integer(),
+                                    z_score= integer())
+
+ bin_for_store <- unique(pile_count_length_list_masterframe_day36_2021_binded_day36$bin)
+
+
+
+#input data to be combined into df
+new_row <- data.frame(
+  group = 1,
+  bin = bin_for_store,
+  date = current_date,
+  rule = "pile",
+  cmls = "more",
+  p_cmls = 0.008 ,
+  z_score = z_score_day36,
+  stringsAsFactors = FALSE
+)
+#bind row of data to df
+hi_form_df_piece_day36 <- rbind(hi_form_df_piece_day36, new_row)
+
+```
+
+
+#combine days
+```{r}
+#bind all summary dfs to make group masterframe
+hi_form_df_piece_master_piece_pile_2021_day_by_day <- rbind(hi_form_df_piece_day1,  hi_form_df_piece_day2,  hi_form_df_piece_day3,  hi_form_df_piece_day4,  hi_form_df_piece_day5,  hi_form_df_piece_day6,  hi_form_df_piece_day7,  hi_form_df_piece_day8,  hi_form_df_piece_day9,  hi_form_df_piece_day10,  hi_form_df_piece_day11,  hi_form_df_piece_day12,  hi_form_df_piece_day13,  hi_form_df_piece_day14,  hi_form_df_piece_day15,  hi_form_df_piece_day16,  hi_form_df_piece_day17,  hi_form_df_piece_day18,  hi_form_df_piece_day19,  hi_form_df_piece_day20,  hi_form_df_piece_day21,  hi_form_df_piece_day22,  hi_form_df_piece_day23,  hi_form_df_piece_day24,  hi_form_df_piece_day25,  hi_form_df_piece_day26,  hi_form_df_piece_day27,  hi_form_df_piece_day28,  hi_form_df_piece_day29,  hi_form_df_piece_day30,  hi_form_df_piece_day31,  hi_form_df_piece_day32,  hi_form_df_piece_day33,  hi_form_df_piece_day34,  hi_form_df_piece_day35,  hi_form_df_piece_day36)
+
+
+#write.csv(hi_form_df_piece_master_piece_pile_2021_day_by_day,  here("ch2 data","hi_form_df_piece_master_piece_pile_2021_day_by_day.csv"), row.names = FALSE)
+```
+
+
+
+
+
+
+#plot rule following comp to random over days
+```{r}
+#load dfs
+#load pile_count_length_sum_2021 by running code above
+pile_count_length_list_masterframe_day_2021_binded <- read_csv(here("ch2 data",("pile_countmaster_day_level_hi_form_2021_custom_thresh.csv")))
+
+hi_form_df_piece_master_piece_pile_2021_day_by_day <- read_csv(here("ch2 data",("hi_form_df_piece_master_piece_pile_2021_day_by_day.csv")))
+
+head(pile_count_length_sum_2021)
+head(pile_count_length_list_masterframe_day_2021_binded)
+head(hi_form_df_piece_master_piece_pile_2021_day_by_day)
+
+str(pile_count_length_list_masterframe_day_2021_binded)
+
+
+#Canonical set of runs ( 1..1000 labels)
+all_runs <- pile_count_length_list_masterframe_day_2021_binded %>%
+  distinct(runIDs) %>% pull()
+
+#Count "rule_followed == yes" per (date, runIDs); then complete to 1000 runs/day
+rand_master_for_fig_pile <- pile_count_length_list_masterframe_day_2021_binded %>%
+  filter(rule_followed == "yes") %>%
+  select(date, runIDs) %>%
+  group_by(date, runIDs) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(date) %>%
+  tidyr::complete(runIDs = all_runs, fill = list(count = 0L)) %>%
+  ungroup() %>%
+  mutate(rule = "pile")
+
+
+
+
+
+str(pile_count_length_sum_2021)
+str(rand_master_for_fig_pile)
+str(hi_form_df_piece_master_piece_pile_2021_day_by_day)
+
+#write.csv(rand_master_for_fig_pile,  here("ch2 data","rand_master_for_fig_pile.csv"), row.names = FALSE)
+
+
+
+#Observed rule follows
+obs_daily <- pile_count_length_sum_2021 %>%
+  select(date, count) %>%
+  rename(obs_count = count)
+
+#Randomized stats per day (FULL RANGE)
+rand_stats <- rand_master_for_fig_pile %>%
+  filter(rule == "pile") %>%
+  group_by(date) %>%
+  summarise(
+    n_draws  = n(),
+    min_rand = min(count, na.rm = TRUE),
+    max_rand = max(count, na.rm = TRUE),
+    mean_rand = mean(count, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(date)
+
+#Bottom z-scores
+z_df <- hi_form_df_piece_master_piece_pile_2021_day_by_day %>%
+  filter(rule == "pile") %>%
+  select(date, cmls, z_score) %>%
+  mutate(
+    cmls = factor(
+      cmls,
+      levels = c("less", "same", "more"),
+      labels = c("Less than random", "Same as random", "More than random")
+    )
+  )
+
+
+
+#Global x-axis so both panels align
+global_min <- min(c(obs_daily$date, rand_stats$date, z_df$date), na.rm = TRUE)
+global_max <- max(c(obs_daily$date, rand_stats$date, z_df$date), na.rm = TRUE)
+global_all_dates <- seq(global_min, global_max, by = "day")
+
+#TOP tube + mean spine + observed, with global x
+p_top <- ggplot() +
+  geom_vline(xintercept = global_all_dates, linewidth = 0.25, alpha = 0.15) +
+  #full-range tube
+  geom_ribbon(
+    data = rand_stats,
+    aes(x = date, ymin = min_rand, ymax = max_rand),
+    fill = "grey40", alpha = 0.18
+  ) +
+  #random mean rule use spine
+  geom_line(
+    data = rand_stats,
+    aes(x = date, y = mean_rand, linetype = "Random mean"),
+    linewidth = 0.9, color = "grey20"
+  ) +
+  # points for random mean
+  geom_point(
+    data = rand_stats,
+    aes(x = date, y = mean_rand),
+    color = "grey20", size = 1.8
+  ) +
+  #observed rule use line
+  geom_line(
+    data = obs_daily,
+    aes(x = date, y = obs_count, color = "Observed"),
+    linewidth = 1.1
+  ) +
+  #Points for observed rule use
+  geom_point(
+    data = obs_daily,
+    aes(x = date, y = obs_count, color = "Observed"),
+    size = 1.8
+  ) +
+  scale_linetype_manual(values = c("Random mean" = "dashed"), name = NULL) +
+  scale_color_manual(values = c("Observed" = "#d62728"), name = NULL) +
+  scale_x_date(
+    breaks = global_all_dates,
+    date_labels = "%b %d",
+    expand = expansion(mult = c(0.001, 0.001))
+  ) +
+  coord_cartesian(xlim = c(global_min, global_max)) +
+  labs(x = "Date", y = "Motif count",
+       title = "Observed vs. randomized motif occurrences (daily)") +
+  theme_minimal(base_size = 20) +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.ticks.x = element_line(linewidth = 0.6),
+    axis.ticks.length.x = grid::unit(3, "pt"),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25),
+    legend.position = "top"
+  )
+#BOTTOM z-scores, with the same global x
+p_bottom <- ggplot(z_df, aes(x = date, y = z_score, fill = cmls)) +
+  geom_vline(xintercept = global_all_dates, linewidth = 0.25, alpha = 0.15) +
+  geom_col() +
+  geom_hline(yintercept = 0, linewidth = 0.4) +
+  scale_fill_manual(
+    values = c("Less than random" = "#d62728", "Same as random" = "grey70", "More than random" = "#2ca02c"),
+    name = NULL
+  ) +
+  scale_x_date(
+    breaks = global_all_dates,
+    date_labels = "%b %d",
+    expand = expansion(mult = c(0.001, 0.001))
+  ) +
+  coord_cartesian(xlim = c(global_min, global_max)) +
+  labs(x = "Date", y = "Z-score", title = "Daily difference (observed vs. random)") +
+  theme_minimal(base_size = 20) +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.ticks.x = element_line(linewidth = 0.6),
+    axis.ticks.length.x = grid::unit(3, "pt"),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.x = element_line(linewidth = 0.25),
+    legend.position = "top"
+  )
+
+#Stack 
+(p_top / p_bottom) + patchwork::plot_layout(heights = c(2, 1))
+
+
+
+
+#16 by 22?
+
+```
